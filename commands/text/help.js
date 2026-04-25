@@ -4,11 +4,12 @@ module.exports = {
   name: "help",
   description: "Shows all prefix commands",
 
-  execute(message) {
+  async execute(message) {
     const commands = message.client.commands;
 
     if (!commands || commands.size === 0) {
-      return message.channel.send("No commands found.");
+      const msg = await message.channel.send("No commands found.");
+      return setTimeout(() => msg.delete().catch(() => {}), 10000);
     }
 
     // Grouping 
@@ -21,7 +22,6 @@ module.exports = {
     commands.forEach(cmd => {
       const text = `\`-${cmd.name}\` • ${cmd.description}`;
 
-      
       if (["ban", "kick", "mute", "warn", "warnings", "unban", "clearwarns", "mkick", "snapban"].includes(cmd.name)) {
         sections["Moderation"].push(text);
       } else if (["help", "whois", "temperature", "team","pull"].includes(cmd.name)) {
@@ -45,6 +45,11 @@ module.exports = {
       .setColor("#00b0f4")
       .setFooter({ text: `Total Commands: ${commands.size}` });
 
-    message.channel.send({ embeds: [embed] });
+    const sentMsg = await message.channel.send({ embeds: [embed] });
+
+    // ephemeral
+    setTimeout(() => {
+      sentMsg.delete().catch(() => {});
+    }, 15000); // disappears after 15 sec
   }
 };
