@@ -11,13 +11,37 @@ module.exports = {
       return message.channel.send("No commands found.");
     }
 
-    const commandList = commands
-      .map(cmd => `• \`-${cmd.name}\` → ${cmd.description}`)
-      .join("\n");
+    // Grouping 
+    const sections = {
+      "Moderation": [],
+      "Utility": [],
+      "Fun / Misc": []
+    };
+
+    commands.forEach(cmd => {
+      const text = `\`-${cmd.name}\` • ${cmd.description}`;
+
+      
+      if (["ban", "kick", "mute", "warn", "warnings", "unban", "clearwarns", "mkick", "snapban"].includes(cmd.name)) {
+        sections["Moderation"].push(text);
+      } else if (["help", "whois", "temperature", "team","pull"].includes(cmd.name)) {
+        sections["Utility"].push(text);
+      } else {
+        sections["Fun / Misc"].push(text);
+      }
+    });
+
+    let description = "";
+
+    for (const [title, cmds] of Object.entries(sections)) {
+      if (cmds.length > 0) {
+        description += `**${title}**\n${cmds.join("\n")}\n\n`;
+      }
+    }
 
     const embed = new EmbedBuilder()
       .setTitle("📜 Help Menu")
-      .setDescription(commandList)
+      .setDescription(description)
       .setColor("#00b0f4")
       .setFooter({ text: `Total Commands: ${commands.size}` });
 
