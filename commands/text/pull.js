@@ -8,7 +8,7 @@ module.exports = {
   execute(message, args) {
     const DEV_ROLE_NAME = "Developer";
 
-    // 🔒 Check role (NOT admin, ONLY this role)
+    // Check role
     if (!message.member.roles.cache.some(role => role.name === DEV_ROLE_NAME)) {
       return message.reply("❌ You need the Developer role to use this command.");
     }
@@ -19,7 +19,7 @@ module.exports = {
       return message.reply("❌ Provide a file name. Example: `-pull index.js`");
     }
 
-    // 🚫 Block sensitive files
+    //  Block sensitive files
     if (fileName.includes(".env")) {
       return message.reply("❌ Access denied.");
     }
@@ -35,7 +35,7 @@ module.exports = {
     const chunk = code.slice(0, 1900);
 
     message.channel.send({
-      content: `📡 Pulling \`${fileName}\`...\n\`\`\`js\n${chunk}\n\`\`\``
+      content: ` Pulling \`${fileName}\`...\n\`\`\`js\n${chunk}\n\`\`\``
     });
   }
 };
