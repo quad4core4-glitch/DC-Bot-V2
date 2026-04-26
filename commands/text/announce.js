@@ -5,7 +5,7 @@ module.exports = {
   description: "Send an announcement in this channel.\nUsage: -announce <title> | <message>",
 
   async execute(message, args) {
-    const DEV_ROLE_ID = "YOUR_DEV_ROLE_ID";
+    const DEV_ROLE_ID = "1341452617619865632";
 
     if (!message.member.roles.cache.has(DEV_ROLE_ID)) {
       return message.reply("You are not allowed to use this command.");
