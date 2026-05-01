@@ -1,40 +1,35 @@
-const { EmbedBuilder } = require("discord.js");
-
 module.exports = {
-  name: "announce",
-  description: "Send an announcement in this channel.\nUsage: -announce <title> | <message>",
+    name: "announce",
+    description: "Send an update announcement",
+    execute: async (message, args) => {
+        // developer role
+        const developerRoleId = "1367467038737436712";
+        
+        if (!message.member.roles.cache.has(developerRoleId)) {
+            return message.reply("Only developers can use this command.❌ ");
+        }
 
-  async execute(message, args) {
-    const DEV_ROLE_ID = "839536675067002950";
+        const announcementChannelId = "1293490674884149329";
+        const announcementChannel = message.client.channels.cache.get(announcementChannelId);
 
-    if (!message.member.roles.cache.has(DEV_ROLE_ID)) {
-      return message.reply("You are not allowed to use this command.");
+        if (!announcementChannel) {
+            return message.reply("❌ Announcement channel not found.");
+        }
+
+        try {
+            await announcementChannel.send({
+                embeds: [{
+                    color: 0xFF6600,
+                    title: "🎉 1 Year Anniversary + Bot Update",
+                    description: "It's been 1 year!🐉\n\n**Bug Fixed**\nBot is back online with improvements.\n\n**Optimized**\nPerformance enhanced.",
+                    footer: { text: "Thank you for your patience and support!" },
+                    timestamp: new Date()
+                }]
+            });
+            message.reply("✅ Announcement sent!");
+        } catch (err) {
+            console.error("❌ Failed to send announcement:", err);
+            message.reply("❌ Failed to send announcement.");
+        }
     }
-
-    if (args.length === 0) {
-      return message.reply("Usage: -announce <title> | <message>");
-    }
-
-    const input = args.join(" ");
-    const [title, description] = input.split("|").map(x => x.trim());
-
-    if (!title || !description) {
-      return message.reply("Format: -announce <title> | <message>");
-    }
-
-    const embed = new EmbedBuilder()
-      .setTitle(title)
-      .setDescription(description)
-      .setColor("#00b0f4")
-      .setFooter({ text: `Announcement by ${message.author.tag}` })
-      .setTimestamp();
-
-    try {
-      await message.delete();
-      await message.channel.send({ embeds: [embed] });
-    } catch (err) {
-      console.error(err);
-      message.reply("Failed to send announcement.");
-    }
-  }
 };

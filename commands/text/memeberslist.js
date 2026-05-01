@@ -1,6 +1,6 @@
 module.exports = {
     name: "team",
-    description: "Show team member list (In-progress)",
+    description: "Show team member list",
 
     async execute(message, args) {
         const leaderRoleId = "1345425056586661961";

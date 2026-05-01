@@ -1,6 +1,5 @@
 module.exports = {
   name: "ban",
-  description: "Bans the mentioned user",
   async execute(message, args) {
     const { PermissionsBitField } = require("discord.js"); 
 if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) {
