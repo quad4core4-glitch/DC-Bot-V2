@@ -2,6 +2,7 @@ const state = {
     me: null,
     config: null,
     lookups: { channels: [], roles: [] },
+    logs: [],
     dirty: false,
     activeTab: "welcome"
 };
@@ -11,9 +12,9 @@ const els = {
     loginView: document.getElementById("loginView"),
     dashboardView: document.getElementById("dashboardView"),
     authMessage: document.getElementById("authMessage"),
-    loginButton: document.getElementById("loginButton"),
     saveButton: document.getElementById("saveButton"),
     syncButton: document.getElementById("syncButton"),
+    syncPanelButton: document.getElementById("syncPanelButton"),
     saveState: document.getElementById("saveState"),
     guildName: document.getElementById("guildName"),
     botStatus: document.getElementById("botStatus"),
@@ -25,6 +26,21 @@ const els = {
     leaveEnabled: document.getElementById("leaveEnabled"),
     leaveChannel: document.getElementById("leaveChannel"),
     leaveMessage: document.getElementById("leaveMessage"),
+    recruitmentEnabled: document.getElementById("recruitmentEnabled"),
+    recruitmentPrivateThreads: document.getElementById("recruitmentPrivateThreads"),
+    recruitmentPanelChannel: document.getElementById("recruitmentPanelChannel"),
+    recruitmentLogChannel: document.getElementById("recruitmentLogChannel"),
+    recruitmentTitle: document.getElementById("recruitmentTitle"),
+    recruitmentColor: document.getElementById("recruitmentColor"),
+    recruitmentDescription: document.getElementById("recruitmentDescription"),
+    recruitmentQuestionsIntro: document.getElementById("recruitmentQuestionsIntro"),
+    recruitmentQuestions: document.getElementById("recruitmentQuestions"),
+    panelMessageId: document.getElementById("panelMessageId"),
+    recruiterRoleStatus: document.getElementById("recruiterRoleStatus"),
+    tutorialList: document.getElementById("tutorialList"),
+    addTutorial: document.getElementById("addTutorial"),
+    recruitmentLogList: document.getElementById("recruitmentLogList"),
+    refreshLogs: document.getElementById("refreshLogs"),
     reactionRoleList: document.getElementById("reactionRoleList"),
     addReactionGroup: document.getElementById("addReactionGroup"),
     logoutButton: document.getElementById("logoutButton"),
@@ -42,6 +58,7 @@ function setAlert(message, type = "") {
 function setBusy(isBusy) {
     els.saveButton.disabled = isBusy;
     els.syncButton.disabled = isBusy;
+    els.syncPanelButton.disabled = isBusy;
 }
 
 function setDirty(isDirty = true) {
@@ -134,6 +151,7 @@ function showLogin(message) {
     els.authMessage.textContent = message;
     els.saveButton.disabled = true;
     els.syncButton.disabled = true;
+    els.syncPanelButton.disabled = true;
 }
 
 function showDashboard() {
@@ -141,18 +159,21 @@ function showDashboard() {
     els.dashboardView.classList.remove("hidden");
     els.saveButton.disabled = false;
     els.syncButton.disabled = false;
+    els.syncPanelButton.disabled = false;
 }
 
 function applyMe(me) {
     state.me = me;
     const userName = displayName(me.user);
     const botReady = me.bot?.ready ? "Connected" : "Disconnected";
+    const recruiterRoleId = me.recruitment?.recruiterRoleId || "";
 
     els.botStatus.textContent = botReady;
     els.accessBot.textContent = botReady;
     els.signedInUser.textContent = me.authenticated ? userName : "Signed out";
     els.accessUser.textContent = me.authenticated ? userName : "Signed out";
     els.oauthStatus.textContent = me.setup?.configured ? "Configured" : "Incomplete";
+    els.recruiterRoleStatus.textContent = recruiterRoleId ? `Role ID ${recruiterRoleId}` : "RECRUITER_ROLE_ID missing";
 }
 
 function renderWelcome() {
@@ -184,7 +205,7 @@ function createOptionRow(option, groupIndex, optionIndex) {
             <span>Label</span>
             <input data-role="label" type="text" maxlength="80" value="${escapeHtml(option.label)}">
         </label>
-        <button class="ghost danger-text" data-action="remove-option" data-group-index="${groupIndex}" data-option-index="${optionIndex}" type="button">Remove</button>
+        <button class="ghost danger-text" data-action="remove-option" data-option-index="${optionIndex}" type="button">Remove</button>
     `;
 
     const roleSelect = row.querySelector('[data-role="role"]');
@@ -218,18 +239,76 @@ function renderReactionRoles() {
     });
 }
 
+function createTutorialRow(tutorial, index) {
+    const template = document.getElementById("tutorialTemplate");
+    const card = template.content.firstElementChild.cloneNode(true);
+    card.dataset.tutorialIndex = String(index);
+    card.dataset.tutorialId = tutorial.id || `tutorial-${index + 1}`;
+    card.querySelector('[data-role="enabled"]').checked = Boolean(tutorial.enabled);
+    card.querySelector('[data-role="label"]').value = tutorial.label || "";
+    card.querySelector('[data-role="description"]').value = tutorial.description || "";
+    card.querySelector('[data-role="videoUrl"]').value = tutorial.videoUrl || "";
+    return card;
+}
+
+function renderLogs() {
+    els.recruitmentLogList.textContent = "";
+
+    if (!state.logs.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-row";
+        empty.textContent = "No recruitment outcomes have been logged yet.";
+        els.recruitmentLogList.appendChild(empty);
+        return;
+    }
+
+    for (const log of state.logs.slice(0, 50)) {
+        const row = document.createElement("div");
+        row.className = "log-row";
+        const outcome = log.outcome === "accepted" ? log.team : "Rejected";
+        row.innerHTML = `
+            <strong>${escapeHtml(outcome)}</strong>
+            <span>${escapeHtml(log.applicantTag || log.applicantId)} closed by ${escapeHtml(log.closedByTag || log.closedById)}</span>
+            <time>${escapeHtml(formatDate(log.closedAt || log.createdAt))}</time>
+        `;
+        els.recruitmentLogList.appendChild(row);
+    }
+}
+
+function renderRecruitment() {
+    const recruitment = state.config.recruitment;
+    els.recruitmentEnabled.checked = Boolean(recruitment.enabled);
+    els.recruitmentPrivateThreads.checked = Boolean(recruitment.privateThreads);
+    fillSelect(els.recruitmentPanelChannel, state.lookups.channels, recruitment.panelChannelId, "Select a channel");
+    fillSelect(els.recruitmentLogChannel, state.lookups.channels, recruitment.logChannelId, "Select a channel");
+    els.recruitmentTitle.value = recruitment.panelTitle || "";
+    els.recruitmentColor.value = /^#[0-9a-f]{6}$/i.test(recruitment.panelColor) ? recruitment.panelColor : "#0f766e";
+    els.recruitmentDescription.value = recruitment.panelDescription || "";
+    els.recruitmentQuestionsIntro.value = recruitment.questionsIntro || "";
+    els.recruitmentQuestions.value = recruitment.questions || "";
+    els.panelMessageId.textContent = recruitment.panelMessageId || "Not synced";
+
+    els.tutorialList.textContent = "";
+    recruitment.tutorials.forEach((tutorial, index) => {
+        els.tutorialList.appendChild(createTutorialRow(tutorial, index));
+    });
+
+    renderLogs();
+}
+
 function renderAll() {
     const lookups = state.lookups || {};
     if (lookups.guild?.name) els.guildName.textContent = lookups.guild.name;
 
     renderWelcome();
+    renderRecruitment();
     renderReactionRoles();
     els.lastSaved.textContent = formatDate(state.config.updatedAt);
     setDirty(false);
 }
 
-function readConfigFromDom() {
-    const reactionRoles = [...els.reactionRoleList.querySelectorAll(".reaction-card")].map((card, groupIndex) => {
+function readReactionRolesFromDom() {
+    return [...els.reactionRoleList.querySelectorAll(".reaction-card")].map((card, groupIndex) => {
         const options = [...card.querySelectorAll(".option-row")].map(row => ({
             emoji: row.querySelector('[data-role="emoji"]').value.trim(),
             roleId: row.querySelector('[data-role="role"]').value.trim(),
@@ -246,7 +325,19 @@ function readConfigFromDom() {
             options
         };
     });
+}
 
+function readTutorialsFromDom() {
+    return [...els.tutorialList.querySelectorAll(".tutorial-card")].map((card, index) => ({
+        id: card.dataset.tutorialId || `tutorial-${Date.now()}-${index}`,
+        label: card.querySelector('[data-role="label"]').value.trim(),
+        description: card.querySelector('[data-role="description"]').value,
+        videoUrl: card.querySelector('[data-role="videoUrl"]').value.trim(),
+        enabled: card.querySelector('[data-role="enabled"]').checked
+    }));
+}
+
+function readConfigFromDom() {
     return {
         ...state.config,
         welcome: {
@@ -259,7 +350,20 @@ function readConfigFromDom() {
             channelId: els.leaveChannel.value,
             message: els.leaveMessage.value
         },
-        reactionRoles
+        recruitment: {
+            ...state.config.recruitment,
+            enabled: els.recruitmentEnabled.checked,
+            privateThreads: els.recruitmentPrivateThreads.checked,
+            panelChannelId: els.recruitmentPanelChannel.value,
+            logChannelId: els.recruitmentLogChannel.value,
+            panelTitle: els.recruitmentTitle.value,
+            panelColor: els.recruitmentColor.value,
+            panelDescription: els.recruitmentDescription.value,
+            questionsIntro: els.recruitmentQuestionsIntro.value,
+            questions: els.recruitmentQuestions.value,
+            tutorials: readTutorialsFromDom()
+        },
+        reactionRoles: readReactionRolesFromDom()
     };
 }
 
@@ -278,9 +382,9 @@ function summarizeSync(sync) {
     return `Saved. ${active} messages synced.`;
 }
 
-async function saveConfig() {
+async function saveConfig(options = {}) {
     setBusy(true);
-    setAlert("");
+    if (!options.quiet) setAlert("");
 
     try {
         const payload = readConfigFromDom();
@@ -291,9 +395,11 @@ async function saveConfig() {
 
         state.config = data.config;
         renderAll();
-        setAlert(summarizeSync(data.sync));
+        if (!options.quiet) setAlert(summarizeSync(data.sync));
+        return true;
     } catch (error) {
         setAlert(error.message, "error");
+        return false;
     } finally {
         setBusy(false);
     }
@@ -320,10 +426,85 @@ async function syncReactionRoles() {
     }
 }
 
+async function syncRecruitmentPanel() {
+    if (state.dirty) {
+        const saved = await saveConfig({ quiet: true });
+        if (!saved) return;
+    }
+
+    setBusy(true);
+    setAlert("");
+
+    try {
+        const data = await api("/api/dashboard/recruitment/panel/sync", { method: "POST" });
+        state.config = data.config || state.config;
+        renderAll();
+        if (data.sync?.skipped) setAlert(`Panel sync skipped: ${data.sync.reason}`);
+        else setAlert(`Apply panel synced in <#${data.sync.channelId}>.`);
+    } catch (error) {
+        setAlert(error.message, "error");
+    } finally {
+        setBusy(false);
+    }
+}
+
+async function refreshLogs() {
+    try {
+        const data = await api("/api/dashboard/recruitment/logs");
+        state.logs = data.logs || [];
+        renderLogs();
+    } catch (error) {
+        setAlert(error.message, "error");
+    }
+}
+
+async function uploadTutorial(button) {
+    const card = button.closest(".tutorial-card");
+    const file = card.querySelector('[data-role="file"]').files[0];
+    if (!file) {
+        setAlert("Choose a video file first.", "error");
+        return;
+    }
+
+    state.config = readConfigFromDom();
+    const saved = await saveConfig({ quiet: true });
+    if (!saved) return;
+
+    const freshCard = [...els.tutorialList.querySelectorAll(".tutorial-card")]
+        .find(item => item.dataset.tutorialId === card.dataset.tutorialId);
+    const tutorialId = freshCard?.dataset.tutorialId || card.dataset.tutorialId;
+
+    setBusy(true);
+    setAlert("Uploading video...");
+
+    try {
+        const response = await fetch(`/api/dashboard/recruitment/tutorials/${encodeURIComponent(tutorialId)}/upload`, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": file.type || "application/octet-stream",
+                "X-File-Name": file.name
+            },
+            body: file
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `Upload failed with ${response.status}`);
+
+        state.config = data.config;
+        renderAll();
+        setAlert("Tutorial video uploaded.");
+    } catch (error) {
+        setAlert(error.message, "error");
+    } finally {
+        setBusy(false);
+    }
+}
+
 async function loadConfig() {
     const data = await api("/api/dashboard/config");
     state.config = data.config;
     state.lookups = data.lookups || { channels: [], roles: [] };
+    state.logs = data.logs || [];
     renderAll();
     showDashboard();
 }
@@ -417,6 +598,44 @@ function handleReactionAction(event) {
     setDirty();
 }
 
+function addTutorial() {
+    state.config = readConfigFromDom();
+    state.config.recruitment.tutorials.push({
+        id: `tutorial-${Date.now()}`,
+        label: "New Tutorial",
+        description: "",
+        videoUrl: "",
+        enabled: true
+    });
+    renderRecruitment();
+    setDirty();
+}
+
+function handleTutorialAction(event) {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+
+    const card = button.closest(".tutorial-card");
+    if (!card) return;
+
+    if (button.dataset.action === "upload-tutorial") {
+        uploadTutorial(button);
+        return;
+    }
+
+    const tutorialIndex = Number(card.dataset.tutorialIndex);
+    if (!Number.isInteger(tutorialIndex)) return;
+
+    state.config = readConfigFromDom();
+
+    if (button.dataset.action === "remove-tutorial") {
+        state.config.recruitment.tutorials.splice(tutorialIndex, 1);
+    }
+
+    renderRecruitment();
+    setDirty();
+}
+
 async function logout() {
     await api("/api/dashboard/logout", { method: "POST" }).catch(() => ({}));
     window.location.href = "/dashboard";
@@ -426,16 +645,22 @@ document.querySelectorAll(".nav-tab").forEach(button => {
     button.addEventListener("click", () => selectTab(button.dataset.tab));
 });
 
-document.getElementById("configForm").addEventListener("input", () => setDirty());
+document.getElementById("configForm").addEventListener("input", event => {
+    if (event.target.type !== "file") setDirty();
+});
 document.getElementById("configForm").addEventListener("change", event => {
     if (event.target.matches('[data-role="role"]')) updateRoleSwatch(event.target);
-    setDirty();
+    if (event.target.type !== "file") setDirty();
 });
 
-els.saveButton.addEventListener("click", saveConfig);
+els.saveButton.addEventListener("click", () => saveConfig());
 els.syncButton.addEventListener("click", syncReactionRoles);
+els.syncPanelButton.addEventListener("click", syncRecruitmentPanel);
 els.addReactionGroup.addEventListener("click", addReactionGroup);
 els.reactionRoleList.addEventListener("click", handleReactionAction);
+els.addTutorial.addEventListener("click", addTutorial);
+els.tutorialList.addEventListener("click", handleTutorialAction);
+els.refreshLogs.addEventListener("click", refreshLogs);
 els.logoutButton.addEventListener("click", logout);
 
 setDirty(false);

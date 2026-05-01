@@ -134,7 +134,7 @@ async function runReactionRoleSync(client) {
         throw new Error("Discord client is not ready yet.");
     }
 
-    const config = loadDashboardConfig();
+    const config = await loadDashboardConfig();
     const reactionRoles = [];
     const results = [];
     let changed = false;
@@ -152,7 +152,7 @@ async function runReactionRoleSync(client) {
     }
 
     const nextConfig = changed
-        ? saveDashboardConfig({ ...config, reactionRoles })
+        ? await saveDashboardConfig({ ...config, reactionRoles })
         : config;
 
     client.reactionRoleMessageMap = buildReactionRoleMessageMap(nextConfig);
@@ -180,12 +180,12 @@ async function handleReactionRole(client, reaction, user, add) {
         if (!messageId) return;
 
         if (!client.reactionRoleMessageMap) {
-            client.reactionRoleMessageMap = buildReactionRoleMessageMap(loadDashboardConfig());
+            client.reactionRoleMessageMap = buildReactionRoleMessageMap(await loadDashboardConfig());
         }
 
         let group = client.reactionRoleMessageMap.get(messageId);
         if (!group) {
-            client.reactionRoleMessageMap = buildReactionRoleMessageMap(loadDashboardConfig());
+            client.reactionRoleMessageMap = buildReactionRoleMessageMap(await loadDashboardConfig());
             group = client.reactionRoleMessageMap.get(messageId);
         }
 

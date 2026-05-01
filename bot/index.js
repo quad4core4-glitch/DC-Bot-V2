@@ -1,12 +1,15 @@
-const { Client, GatewayIntentBits, Collection,Partials } = require("discord.js");
+const { Client, GatewayIntentBits, Collection, Partials } = require("discord.js");
 const fs = require("fs");
 const path = require("path");
 require("dotenv").config();
-const { registerDashboardRoutes } = require("./utils/dashboardRoutes");
 const {
     ensureReactionRoleMessages,
     handleReactionRole: handleDashboardReactionRole
 } = require("./utils/reactionRoleManager");
+const {
+    ensureRecruitmentPanel,
+    handleRecruitmentInteraction
+} = require("./utils/recruitmentManager");
 
 // Error handlers
 process.on("unhandledRejection", reason => console.error("Unhandled Rejection:", reason));
@@ -159,20 +162,21 @@ client.on("interactionCreate", async interaction => {
         if (!cmd) return;
 
         try {
-            await cmd.execute(interaction);
+            await cmd.execute(interaction, client);
         } catch (err) {
             console.error(`❌ Slash error ${interaction.commandName}:`, err);
-            interaction.reply({ content: "❌ Error executing this command.", ephemeral: true });
+            const payload = { content: "Error executing this command.", ephemeral: true };
+            if (interaction.deferred || interaction.replied) {
+                interaction.followUp(payload).catch(() => null);
+            } else {
+                interaction.reply(payload).catch(() => null);
+            }
         }
     }
 
     if (interaction.isButton()) {
-        try {
-            const buttonHandler = require("./commands/events/buttonHandler.js");
-            await buttonHandler.execute(interaction);
-        } catch (err) {
-            console.error("❌ Button handler error:", err);
-        }
+        const handled = await handleRecruitmentInteraction(interaction);
+        if (handled) return;
     }
 });
 
@@ -201,6 +205,25 @@ client.once("ready", async () => {
         console.error("❌ Reaction role script error:", err.message);
         client.reactionRoleMessageMap = new Map();
     }
+
+    console.log("Syncing recruitment Apply panel...");
+
+    try {
+        const sync = await Promise.race([
+            ensureRecruitmentPanel(client),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("Recruitment panel sync timeout after 20s")), 20000)
+            )
+        ]);
+
+        if (sync.skipped) {
+            console.log(`Recruitment panel sync skipped: ${sync.reason}`);
+        } else {
+            console.log(`Recruitment panel ready in ${sync.channelId} (${sync.messageId}).`);
+        }
+    } catch (err) {
+        console.error("Recruitment panel sync error:", err.message);
+    }
 });
 
 // Handle unexpected disconnections
@@ -225,7 +248,6 @@ const PORT = process.env.PORT || 3000;
 
 app.set("trust proxy", 1);
 app.use(express.json({ limit: "256kb" }));
-registerDashboardRoutes(app, client);
 
 app.get("/", (req, res) => {
     res.json({

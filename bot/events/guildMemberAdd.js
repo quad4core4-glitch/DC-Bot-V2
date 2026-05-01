@@ -4,7 +4,7 @@ const { renderMemberTemplate } = require("../utils/messageTemplates");
 module.exports = {
     name: "guildMemberAdd",
     async execute(member) {
-        const { welcome } = loadDashboardConfig();
+        const { welcome } = await loadDashboardConfig();
         if (!welcome.enabled || !welcome.channelId) return;
 
         try {

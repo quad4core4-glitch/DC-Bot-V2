@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { getGuildMember } = require("./discordApi");
 
 const DISCORD_API = "https://discord.com/api/v10";
 const SESSION_COOKIE = "dca_dashboard_session";
@@ -28,10 +29,9 @@ function getBaseUrl(req) {
     return `${String(protocol).split(",")[0]}://${req.get("host")}`;
 }
 
-function getOAuthConfig(req, client) {
-    const clientId = process.env.DISCORD_CLIENT_ID || client.application?.id || client.user?.id || "";
+function getOAuthConfig(req) {
     const config = {
-        clientId,
+        clientId: process.env.DISCORD_CLIENT_ID || "",
         clientSecret: process.env.DISCORD_CLIENT_SECRET || "",
         guildId: process.env.DISCORD_GUILD_ID || "",
         allowedRoleId: getAllowedRoleId(),
@@ -43,6 +43,7 @@ function getOAuthConfig(req, client) {
     if (!config.clientSecret) missing.push("DISCORD_CLIENT_SECRET");
     if (!config.guildId) missing.push("DISCORD_GUILD_ID");
     if (!config.allowedRoleId) missing.push("DASHBOARD_ALLOWED_ROLE_ID");
+    if (!process.env.DISCORD_TOKEN) missing.push("DISCORD_TOKEN");
 
     return { ...config, missing, configured: missing.length === 0 };
 }
@@ -140,10 +141,6 @@ function getSignedCookie(req, name) {
 }
 
 async function discordRequest(url, options) {
-    if (typeof fetch !== "function") {
-        throw new Error("The dashboard requires Node.js 18 or newer for Discord OAuth requests.");
-    }
-
     const response = await fetch(url, options);
     const text = await response.text();
     let data = {};
@@ -233,23 +230,20 @@ function destroySession(req, res) {
     clearCookie(req, res, SESSION_COOKIE);
 }
 
-async function sessionStillHasRole(session, client) {
-    const guildId = process.env.DISCORD_GUILD_ID || "";
+async function sessionStillHasRole(session) {
     const allowedRoleId = getAllowedRoleId();
-
-    if (!guildId || !allowedRoleId) return false;
+    if (!allowedRoleId) return false;
     if (Date.now() - session.lastRoleCheckAt < ROLE_RECHECK_MS) return true;
-    if (!client?.isReady?.()) return null;
 
     try {
-        const guild = await client.guilds.fetch(guildId);
-        const member = await guild.members.fetch(session.user.id);
-        const ok = member.roles.cache.has(allowedRoleId);
+        const member = await getGuildMember(session.user.id);
+        const roles = Array.isArray(member.roles) ? member.roles : [];
+        const ok = roles.includes(allowedRoleId);
         const stored = sessions.get(session.id);
 
         if (stored) {
             stored.lastRoleCheckAt = Date.now();
-            stored.memberRoles = [...member.roles.cache.keys()];
+            stored.memberRoles = roles;
         }
 
         return ok;
@@ -259,7 +253,7 @@ async function sessionStillHasRole(session, client) {
     }
 }
 
-function requireDashboardAuth(client) {
+function requireDashboardAuth() {
     return async (req, res, next) => {
         const session = getSession(req);
         if (!session) {
@@ -267,7 +261,7 @@ function requireDashboardAuth(client) {
             return;
         }
 
-        const roleOk = await sessionStillHasRole(session, client);
+        const roleOk = await sessionStillHasRole(session);
         if (roleOk === false) {
             destroySession(req, res);
             res.status(403).json({ error: "Required Discord role is missing." });
@@ -284,9 +278,9 @@ function requireDashboardAuth(client) {
     };
 }
 
-function registerDashboardAuthRoutes(app, client) {
+function registerDashboardAuthRoutes(app) {
     app.get("/auth/discord", (req, res) => {
-        const oauthConfig = getOAuthConfig(req, client);
+        const oauthConfig = getOAuthConfig(req);
         if (!oauthConfig.configured) {
             res.redirect("/dashboard?auth=setup");
             return;
@@ -308,7 +302,7 @@ function registerDashboardAuthRoutes(app, client) {
     });
 
     app.get("/auth/discord/callback", async (req, res) => {
-        const oauthConfig = getOAuthConfig(req, client);
+        const oauthConfig = getOAuthConfig(req);
         const expectedState = getSignedCookie(req, STATE_COOKIE);
         clearCookie(req, res, STATE_COOKIE);
 

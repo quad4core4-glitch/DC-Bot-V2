@@ -19,6 +19,7 @@
 
             <nav class="nav-tabs" aria-label="Dashboard sections">
                 <button class="nav-tab active" data-tab="welcome" type="button">Welcome</button>
+                <button class="nav-tab" data-tab="recruitment" type="button">Recruitment</button>
                 <button class="nav-tab" data-tab="reactionRoles" type="button">Reaction Roles</button>
                 <button class="nav-tab" data-tab="access" type="button">Access</button>
             </nav>
@@ -32,6 +33,7 @@
                 </div>
                 <div class="topbar-actions">
                     <span id="saveState" class="save-state">Idle</span>
+                    <button id="syncPanelButton" class="secondary" type="button">Sync Apply Panel</button>
                     <button id="syncButton" class="secondary" type="button">Sync Messages</button>
                     <button id="saveButton" class="primary" type="button">Save Changes</button>
                 </div>
@@ -118,6 +120,90 @@
                         <div id="reactionRoleList" class="reaction-list"></div>
                     </section>
 
+                    <section class="settings-section" data-panel="recruitment">
+                        <div class="section-heading">
+                            <div>
+                                <p class="eyebrow">Applications</p>
+                                <h2>Recruitment Tickets</h2>
+                            </div>
+                            <button id="addTutorial" class="secondary" type="button">Add Tutorial</button>
+                        </div>
+
+                        <div class="form-grid two">
+                            <label class="toggle-row">
+                                <input id="recruitmentEnabled" type="checkbox">
+                                <span>Recruitment Enabled</span>
+                            </label>
+                            <label class="toggle-row">
+                                <input id="recruitmentPrivateThreads" type="checkbox">
+                                <span>Private Threads</span>
+                            </label>
+                        </div>
+
+                        <div class="form-grid two">
+                            <label class="field">
+                                <span>Apply Panel Channel</span>
+                                <select id="recruitmentPanelChannel"></select>
+                            </label>
+                            <label class="field">
+                                <span>Member Log Channel</span>
+                                <select id="recruitmentLogChannel"></select>
+                            </label>
+                        </div>
+
+                        <div class="form-grid two">
+                            <label class="field">
+                                <span>Panel Title</span>
+                                <input id="recruitmentTitle" type="text" maxlength="120">
+                            </label>
+                            <label class="field">
+                                <span>Panel Color</span>
+                                <input id="recruitmentColor" type="color">
+                            </label>
+                        </div>
+
+                        <label class="field">
+                            <span>Panel Body</span>
+                            <textarea id="recruitmentDescription" rows="4"></textarea>
+                        </label>
+
+                        <label class="field">
+                            <span>Question Intro</span>
+                            <textarea id="recruitmentQuestionsIntro" rows="3"></textarea>
+                        </label>
+
+                        <label class="field">
+                            <span>Questions</span>
+                            <textarea id="recruitmentQuestions" rows="7"></textarea>
+                        </label>
+
+                        <div class="status-grid compact-status" aria-label="Recruitment status">
+                            <div class="status-item">
+                                <span>Apply Button</span>
+                                <strong>Apply!</strong>
+                            </div>
+                            <div class="status-item">
+                                <span>Panel Message</span>
+                                <strong id="panelMessageId">Not synced</strong>
+                            </div>
+                            <div class="status-item">
+                                <span>Recruiter Role</span>
+                                <strong id="recruiterRoleStatus">Checking</strong>
+                            </div>
+                        </div>
+
+                        <div class="subsection-heading">
+                            <span>Tutorial Videos</span>
+                        </div>
+                        <div id="tutorialList" class="tutorial-list"></div>
+
+                        <div class="subsection-heading">
+                            <span>Member Logs</span>
+                            <button id="refreshLogs" class="ghost" type="button">Refresh</button>
+                        </div>
+                        <div id="recruitmentLogList" class="log-list"></div>
+                    </section>
+
                     <section class="settings-section" data-panel="access">
                         <div class="section-heading">
                             <div>
@@ -178,6 +264,39 @@
                 <button class="ghost" data-action="add-option" type="button">Add Role</button>
             </div>
             <div class="option-list"></div>
+        </article>
+    </template>
+
+    <template id="tutorialTemplate">
+        <article class="tutorial-card">
+            <div class="reaction-card-header">
+                <label class="toggle-row compact">
+                    <input data-role="enabled" type="checkbox">
+                    <span>Enabled</span>
+                </label>
+                <button class="ghost danger-text" data-action="remove-tutorial" type="button">Remove</button>
+            </div>
+
+            <div class="form-grid two">
+                <label class="field">
+                    <span>Button Label</span>
+                    <input data-role="label" type="text" maxlength="40">
+                </label>
+                <label class="field">
+                    <span>Video URL</span>
+                    <input data-role="videoUrl" type="url">
+                </label>
+            </div>
+
+            <label class="field">
+                <span>Message Text</span>
+                <textarea data-role="description" rows="3"></textarea>
+            </label>
+
+            <div class="upload-row">
+                <input data-role="file" type="file" accept="video/*">
+                <button class="secondary" data-action="upload-tutorial" type="button">Upload Video</button>
+            </div>
         </article>
     </template>
 

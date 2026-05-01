@@ -3,7 +3,7 @@ require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
 
-const clientId = "1340222971847114762";
+const clientId = process.env.DISCORD_CLIENT_ID || "1340222971847114762";
 const token = process.env.DISCORD_TOKEN;
 
 if (!token) {

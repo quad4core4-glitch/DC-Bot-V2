@@ -306,12 +306,20 @@ button:disabled {
 
 .section-heading,
 .reaction-card-header,
-.options-heading {
+.options-heading,
+.subsection-heading {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
     margin-bottom: 18px;
+}
+
+.subsection-heading {
+    margin-top: 22px;
+    padding-top: 4px;
+    color: var(--text);
+    font-weight: 800;
 }
 
 .form-grid {
@@ -383,12 +391,15 @@ button:disabled {
     accent-color: var(--accent);
 }
 
-.reaction-list {
+.reaction-list,
+.tutorial-list,
+.log-list {
     display: grid;
     gap: 14px;
 }
 
-.reaction-card {
+.reaction-card,
+.tutorial-card {
     padding: 16px;
     border: 1px solid var(--line);
     border-radius: 8px;
@@ -432,6 +443,48 @@ button:disabled {
     gap: 12px;
 }
 
+.compact-status {
+    margin-top: 14px;
+}
+
+.upload-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+}
+
+.upload-row input {
+    min-height: 42px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 8px;
+    background: #ffffff;
+}
+
+.log-row,
+.empty-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr) minmax(150px, 0.25fr);
+    gap: 10px;
+    align-items: center;
+    min-height: 54px;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #fbfcfc;
+}
+
+.log-row span,
+.log-row time,
+.empty-row {
+    color: var(--muted);
+}
+
+.log-row time {
+    text-align: right;
+}
+
 @media (max-width: 900px) {
     .app-shell {
         grid-template-columns: 1fr;
@@ -446,7 +499,7 @@ button:disabled {
     }
 
     .nav-tabs {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(4, minmax(0, 1fr));
         margin-top: 16px;
     }
 
@@ -474,6 +527,16 @@ button:disabled {
     .form-grid.two {
         grid-template-columns: 1fr;
     }
+
+    .log-row,
+    .empty-row,
+    .upload-row {
+        grid-template-columns: 1fr;
+    }
+
+    .log-row time {
+        text-align: left;
+    }
 }
 
 @media (max-width: 680px) {
@@ -489,5 +552,9 @@ button:disabled {
     .topbar-actions > button,
     .save-state {
         flex: 1 1 140px;
+    }
+
+    .nav-tabs {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }

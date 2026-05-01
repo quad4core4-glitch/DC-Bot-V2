@@ -5,7 +5,7 @@ const { renderMemberTemplate } = require("../utils/messageTemplates");
 module.exports = {
     name: Events.GuildMemberRemove,
     async execute(member) {
-        const { leave } = loadDashboardConfig();
+        const { leave } = await loadDashboardConfig();
         if (!leave.enabled || !leave.channelId) return;
 
         try {
