@@ -37,6 +37,23 @@ async function getTicket(threadId) {
     return state.tickets[threadId] ? clone(state.tickets[threadId]) : null;
 }
 
+async function listTickets(filter = {}) {
+    const state = normalizeTickets(await readState(TICKETS_SCOPE, emptyTickets()));
+    let tickets = Object.values(state.tickets).map(clone);
+
+    if (filter.status) {
+        tickets = tickets.filter(ticket => ticket.status === filter.status);
+    }
+
+    if (filter.applicantId) {
+        tickets = tickets.filter(ticket => ticket.applicantId === filter.applicantId);
+    }
+
+    return tickets.sort((a, b) =>
+        String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || ""))
+    );
+}
+
 async function saveTicket(ticket) {
     if (!ticket?.threadId) throw new Error("Ticket is missing threadId.");
 
@@ -82,6 +99,7 @@ async function appendRecruitmentLog(log) {
 
 module.exports = {
     getTicket,
+    listTickets,
     saveTicket,
     updateTicket,
     listRecruitmentLogs,

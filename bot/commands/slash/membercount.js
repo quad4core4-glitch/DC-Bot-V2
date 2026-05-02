@@ -1,86 +1,109 @@
-const { SlashCommandBuilder } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
-
-
-const dataPath = path.join(__dirname, '../../data/memberCounts.json');
-const messageIdPath = path.join(__dirname, '../../data/messageId.json');
+const { PermissionFlagsBits, SlashCommandBuilder } = require("discord.js");
+const { loadDashboardConfig, saveDashboardConfig } = require("../../utils/dashboardConfig");
+const { syncMemberCountMessage } = require("../../utils/memberCountManager");
+const { logAction } = require("../../utils/logStore");
 
 module.exports = {
-  data: new SlashCommandBuilder()
-    .setName('membercount')
-    .setDescription('Displays the current member counts for all teams.'),
-  async execute(interaction) {
-    
-    await interaction.deferReply({ ephemeral: true });
+    data: new SlashCommandBuilder()
+        .setName("membercount")
+        .setDescription("Manage the team member count message")
+        .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName("sync")
+                .setDescription("Create or update the member count message from dashboard settings")
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName("set")
+                .setDescription("Set a team's player count")
+                .addStringOption(option =>
+                    option.setName("team").setDescription("Team name").setRequired(true)
+                )
+                .addIntegerOption(option =>
+                    option.setName("players").setDescription("Player count").setRequired(true).setMinValue(0).setMaxValue(999)
+                )
+                .addStringOption(option =>
+                    option.setName("status").setDescription("Recruitment status").setRequired(false)
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName("list")
+                .setDescription("Show configured member counts")
+        ),
 
-    try {
-      const memberData = JSON.parse(fs.readFileSync(dataPath, 'utf8'));
-      const messageIdData = JSON.parse(fs.readFileSync(messageIdPath, 'utf8'));
+    async execute(interaction) {
+        const subcommand = interaction.options.getSubcommand();
+        await interaction.deferReply({ ephemeral: true });
 
-      const channelId = messageIdData.channelId;
-      let messageId = messageIdData.messageId;
-
-      const channel = await interaction.client.channels.fetch(channelId);
-      if (!channel) {
-        await interaction.editReply('Error: The specified channel was not found.');
-        return;
-      }      
-      const messageContent = `
-# Member Count
-## Team 1- 🇦🇶 Discord 
-(Division-CC)
-Number of Players- ${memberData['Discord'].players}
-Recruitment Status- ${memberData['Discord'].recruitment}
-
-## Team 2- 🇦🇶 Discord²
-(Division-CC)
-Number of Players- ${memberData['Discord²'].players}
-Recruitment Status- ${memberData['Discord²'].recruitment}
-
-## Team 3- 🇦🇶 Discord 3™
-(Division-I)
-Number of Players- ${memberData['Discord 3™️'].players}
-Recruitment Status- ${memberData['Discord 3™️'].recruitment}
-
-## Team 4- 🇦🇶 Baja DC
-(Division-II)
-Number of Players- ${memberData['Baja DC'].players}
-Recruitment Status- ${memberData['Baja DC'].recruitment}
-
-## Team 5- 🇦🇶 Formula DCx
-(Division-VI)
-Number of Players- ${memberData['Formula DCx'].players}
-Recruitment Status- ${memberData['Formula DCx'].recruitment}
-
-## Team 6- 🇦🇶 Rally DCy
-(Division-IV)
-Number of Players- ${memberData['Rally DCy'].players}
-Recruitment Status- ${memberData['Rally DCy'].recruitment}
-      `;
-
-      
-      let targetMessage;
-      if (messageId !== '0') {
-        try {
-          targetMessage = await channel.messages.fetch(messageId);
-        } catch (error) {
-          console.error('Error fetching message:', error);
+        if (subcommand === "sync") {
+            const sync = await syncMemberCountMessage(interaction.client);
+            await interaction.editReply(sync.skipped
+                ? `Skipped: ${sync.reason}`
+                : `Member count message ${sync.created ? "created" : "updated"} in <#${sync.channelId}>.`
+            );
+            return;
         }
-      }
 
-      if (targetMessage) {
-        await targetMessage.edit(messageContent);
-        await interaction.editReply('Member count message updated successfully!');
-      } else {
-        const newMessage = await channel.send(messageContent);
-        messageIdData.messageId = newMessage.id;
-        fs.writeFileSync(messageIdPath, JSON.stringify(messageIdData, null, 2));
-        await interaction.editReply('Member count message created successfully!');
-      }
-    } catch (error) {
-      console.error('Error executing membercount command:', error);
-      await interaction.editReply('There was an error processing the member counts. Please try again later.');
+        if (subcommand === "set") {
+            const teamName = interaction.options.getString("team", true);
+            const players = interaction.options.getInteger("players", true);
+            const status = interaction.options.getString("status", false);
+            const config = await loadDashboardConfig();
+            const target = teamName.toLowerCase().replace(/[^a-z0-9]+/g, "");
+            let found = false;
+            let foundTeam = null;
+
+            const teams = config.memberCounts.teams.map(team => {
+                const names = [team.name, ...(team.aliases || [])].map(name => String(name).toLowerCase().replace(/[^a-z0-9]+/g, ""));
+                if (!names.includes(target)) return team;
+                found = true;
+                foundTeam = team;
+                return {
+                    ...team,
+                    players,
+                    recruitmentStatus: status || team.recruitmentStatus
+                };
+            });
+
+            if (!found) {
+                await interaction.editReply(`Team **${teamName}** is not configured. Add it from the dashboard first.`);
+                return;
+            }
+
+            await saveDashboardConfig({
+                ...config,
+                memberCounts: {
+                    ...config.memberCounts,
+                    teams
+                }
+            });
+
+            await logAction(interaction.client, {
+                type: "memberCount",
+                title: "Member Count Edited",
+                message: `<@${interaction.user.id}> set **${foundTeam.name}** to **${players}** players${status ? `, ${status}` : ""}.`,
+                guildId: interaction.guildId,
+                actorId: interaction.user.id,
+                actorTag: interaction.user.tag || interaction.user.username,
+                metadata: { teamId: foundTeam.id, players, status: status || "" }
+            });
+
+            const sync = await syncMemberCountMessage(interaction.client);
+            await interaction.editReply(sync.skipped
+                ? `Saved, but sync skipped: ${sync.reason}`
+                : `Saved and updated <#${sync.channelId}>.`
+            );
+            return;
+        }
+
+        if (subcommand === "list") {
+            const { memberCounts } = await loadDashboardConfig();
+            await interaction.editReply(memberCounts.teams
+                .map(team => `**${team.name}** - ${team.players} players, ${team.recruitmentStatus}`)
+                .join("\n") || "No teams are configured."
+            );
+        }
     }
-  },
 };

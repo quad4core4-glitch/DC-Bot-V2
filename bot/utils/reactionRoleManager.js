@@ -1,4 +1,5 @@
 const { loadDashboardConfig, saveDashboardConfig } = require("./dashboardConfig");
+const { logAction } = require("./logStore");
 let syncPromise = null;
 
 function normalizeForSearch(value) {
@@ -202,9 +203,31 @@ async function handleReactionRole(client, reaction, user, add) {
 
         if (add) {
             await member.roles.add(option.roleId, `Reaction role: ${group.name}`);
+            const rulesRoleId = (await loadDashboardConfig()).recruitment?.communityRulesRoleId || "";
+            if (rulesRoleId && option.roleId === rulesRoleId) {
+                const { processDueTeamRoleAssignments } = require("./teamRoleScheduler");
+                processDueTeamRoleAssignments(client, user.id, { ignoreRunAt: true }).catch(error => {
+                    console.error("Team role assignment after rules role failed:", error.message);
+                });
+            }
         } else {
             await member.roles.remove(option.roleId, `Reaction role: ${group.name}`);
         }
+
+        await logAction(client, {
+            type: "reactionRole",
+            title: add ? "Reaction Role Added" : "Reaction Role Removed",
+            message: `<@${user.id}> ${add ? "received" : "lost"} <@&${option.roleId}> from **${group.name}**.`,
+            guildId: guild.id,
+            actorId: user.id,
+            actorTag: user.tag || user.username || user.id,
+            metadata: {
+                groupId: group.id,
+                roleId: option.roleId,
+                emoji: option.emoji,
+                messageId
+            }
+        });
     } catch (error) {
         console.error("Reaction role update failed:", error);
     }

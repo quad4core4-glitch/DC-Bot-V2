@@ -11,7 +11,13 @@ const JSON_PATHS = {
         : path.join(__dirname, "..", "data", "recruitmentTickets.json"),
     recruitmentLogs: () => process.env.RECRUITMENT_LOGS_PATH
         ? path.resolve(process.env.RECRUITMENT_LOGS_PATH)
-        : path.join(__dirname, "..", "data", "recruitmentLogs.json")
+        : path.join(__dirname, "..", "data", "recruitmentLogs.json"),
+    recruitmentBans: () => process.env.RECRUITMENT_BANS_PATH
+        ? path.resolve(process.env.RECRUITMENT_BANS_PATH)
+        : path.join(__dirname, "..", "data", "recruitmentBans.json"),
+    botLogs: () => process.env.BOT_LOGS_PATH
+        ? path.resolve(process.env.BOT_LOGS_PATH)
+        : path.join(__dirname, "..", "data", "botLogs.json")
 };
 
 let pool;

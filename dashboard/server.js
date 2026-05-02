@@ -31,6 +31,10 @@ app.get("/health", (req, res) => {
     });
 });
 
-app.listen(PORT, () => {
-    console.log(`Dashboard server running on ${PORT}`);
-});
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`Dashboard server running on ${PORT}`);
+    });
+}
+
+module.exports = app;

@@ -1,0 +1,10 @@
+node_modules/
+bot/node_modules/
+dashboard/node_modules/
+dashboard/dist/
+.env
+.env.*
+!.env.example
+!bot/.env.example
+!dashboard/.env.example
+*.log

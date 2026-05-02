@@ -1,22 +1,28 @@
 const {
     ActionRowBuilder,
+    AttachmentBuilder,
     ButtonBuilder,
     ButtonStyle,
     ChannelType,
     EmbedBuilder,
     PermissionFlagsBits
 } = require("discord.js");
+const crypto = require("crypto");
 const { loadDashboardConfig, saveDashboardConfig } = require("./dashboardConfig");
+const { logAction } = require("./logStore");
+const { incrementTeamCount } = require("./memberCountManager");
+const { queueTeamRoleAssignment } = require("./teamRoleScheduler");
 const {
     appendRecruitmentLog,
     getTicket,
+    listTickets,
     saveTicket,
     updateTicket
 } = require("./recruitmentStore");
 
 const APPLY_BUTTON_ID = "recruitment:apply";
-const EVENT_YES_ID = "recruitment:event:yes";
-const EVENT_NO_ID = "recruitment:event:no";
+const EVENT_YES_PREFIX = "recruitment:event:yes:";
+const EVENT_NO_PREFIX = "recruitment:event:no:";
 const CLAIM_ID = "recruitment:claim";
 const CLOSE_ID = "recruitment:close";
 const CLOSE_TEAM_PREFIX = "recruitment:close-team:";
@@ -25,7 +31,7 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif)$/i;
 const activeSessions = new Map();
 
-const TEAM_BUTTONS = [
+const RECRUITMENT_OUTCOMES = [
     { id: "discord", label: "Discord", team: "Discord", style: ButtonStyle.Success },
     { id: "discord2", label: "Discord\u00b2", team: "Discord\u00b2", style: ButtonStyle.Success },
     { id: "discord3", label: "Discord 3\u2122", team: "Discord 3\u2122", style: ButtonStyle.Success },
@@ -33,12 +39,34 @@ const TEAM_BUTTONS = [
     { id: "rejected", label: "Rejected", team: "", style: ButtonStyle.Danger }
 ];
 
-function sessionKey(interaction) {
-    return `${interaction.guildId}:${interaction.channelId}:${interaction.user.id}`;
+function sessionToken() {
+    return crypto.randomBytes(8).toString("hex");
 }
 
-function recruiterRoleId() {
-    return process.env.RECRUITER_ROLE_ID || process.env.RECRUITMENT_RECRUITER_ROLE_ID || "";
+function findActiveSession(guildId, userId) {
+    return [...activeSessions.values()].find(session =>
+        session.guildId === guildId &&
+        session.userId === userId
+    ) || null;
+}
+
+function rememberSession(session) {
+    session.timeout = setTimeout(() => activeSessions.delete(session.token), SESSION_TIMEOUT_MS * 3);
+    activeSessions.set(session.token, session);
+}
+
+function deleteSession(token) {
+    const session = activeSessions.get(token);
+    if (session?.timeout) clearTimeout(session.timeout);
+    activeSessions.delete(token);
+}
+
+function recruiterRoleId(config = null) {
+    return config?.recruitment?.recruiterRoleId ||
+        config?.bot?.recruiterRoleId ||
+        process.env.RECRUITER_ROLE_ID ||
+        process.env.RECRUITMENT_RECRUITER_ROLE_ID ||
+        "";
 }
 
 function isImageAttachment(attachment) {
@@ -65,13 +93,20 @@ function displayTag(user) {
 }
 
 function safeThreadName(user) {
-    const base = (user.globalName || user.username || "applicant")
-        .toLowerCase()
-        .replace(/[^a-z0-9_-]+/g, "-")
+    return (user.username || user.globalName || "applicant")
+        .replace(/[\r\n\t]+/g, " ")
         .replace(/^-+|-+$/g, "")
-        .slice(0, 34);
+        .trim()
+        .slice(0, 90) || "applicant";
+}
 
-    return `apply-${base || "applicant"}-${user.id.slice(-4)}`;
+function safeTicketName(value) {
+    return String(value || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9 _-]+/g, "")
+        .replace(/\s+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 90);
 }
 
 function colorToNumber(color) {
@@ -96,6 +131,60 @@ function buildPanelPayload(config) {
     return { embeds: [embed], components: [row] };
 }
 
+function safeAttachmentName(name, fallback) {
+    const clean = String(name || fallback || "screenshot.png")
+        .replace(/[/\\?%*:|"<>]/g, "-")
+        .replace(/\s+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 80);
+
+    return clean || fallback || "screenshot.png";
+}
+
+function screenshotDmUserId(config) {
+    return config?.recruitment?.screenshotDmUserId ||
+        process.env.RECRUITMENT_SCREENSHOT_DM_USER_ID ||
+        "";
+}
+
+function teamOutcomeId(index) {
+    return `team:${index}`;
+}
+
+function teamNameFromOutcomeId(outcomeId, config) {
+    if (!String(outcomeId || "").startsWith("team:")) return "";
+    const index = Number.parseInt(outcomeId.slice("team:".length), 10);
+    if (!Number.isInteger(index)) return "";
+    return config?.recruitment?.teams?.[index] || "";
+}
+
+function responsePayload(payload) {
+    if (typeof payload === "string") return { content: payload, ephemeral: true };
+    return { ...payload, ephemeral: true };
+}
+
+async function respondEphemeral(interaction, payload) {
+    const data = responsePayload(payload);
+
+    if (interaction.deferred) {
+        const { ephemeral, ...editable } = data;
+        return interaction.editReply(editable);
+    }
+    if (interaction.replied) return interaction.followUp(data);
+    return interaction.reply(data);
+}
+
+async function acknowledgeCloseSelection(interaction, payload) {
+    const data = responsePayload(payload);
+
+    if (interaction.isButton?.() && !interaction.deferred && !interaction.replied) {
+        const { ephemeral, ...editable } = data;
+        return interaction.update({ ...editable, components: data.components || [] });
+    }
+
+    return respondEphemeral(interaction, data);
+}
+
 async function fetchPanelMessage(channel, messageId) {
     if (!messageId || !channel.messages?.fetch) return null;
 
@@ -104,6 +193,40 @@ async function fetchPanelMessage(channel, messageId) {
     } catch {
         return null;
     }
+}
+
+async function cleanRecruitmentPanelChannel(client, config = null) {
+    const activeConfig = config || await loadDashboardConfig();
+    const recruitment = activeConfig.recruitment;
+    if (!recruitment.panelChannelId) return { skipped: true, reason: "Recruitment panel channel is not configured." };
+    if (!recruitment.panelMessageId) return { skipped: true, reason: "Recruitment panel message is not configured." };
+
+    const channel = await client.channels.fetch(recruitment.panelChannelId).catch(() => null);
+    if (!channel?.isTextBased?.() || !channel.messages?.fetch) {
+        return { skipped: true, reason: "Recruitment panel channel is not text based." };
+    }
+
+    let deleted = 0;
+    let scanned = 0;
+    let before;
+
+    while (scanned < 500) {
+        const messages = await channel.messages.fetch({ limit: 100, before }).catch(() => null);
+        if (!messages?.size) break;
+
+        scanned += messages.size;
+        before = messages.last()?.id;
+        for (const message of messages.values()) {
+            if (message.id === recruitment.panelMessageId) continue;
+            await message.delete().then(() => {
+                deleted += 1;
+            }).catch(() => null);
+        }
+
+        if (messages.size < 100) break;
+    }
+
+    return { deleted, channelId: channel.id };
 }
 
 async function ensureRecruitmentPanel(client) {
@@ -145,6 +268,16 @@ async function ensureRecruitmentPanel(client) {
         });
     }
 
+    await cleanRecruitmentPanelChannel(client, {
+        ...config,
+        recruitment: {
+            ...recruitment,
+            panelMessageId: message.id
+        }
+    }).catch(error => {
+        console.error("Failed to clean recruitment panel channel:", error.message);
+    });
+
     return {
         created,
         channelId: channel.id,
@@ -152,31 +285,50 @@ async function ensureRecruitmentPanel(client) {
     };
 }
 
-function buildEventDecisionRow() {
+function buildEventDecisionRow(token) {
     return new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-            .setCustomId(EVENT_YES_ID)
+            .setCustomId(`${EVENT_YES_PREFIX}${token}`)
             .setLabel("Yes")
             .setStyle(ButtonStyle.Success),
         new ButtonBuilder()
-            .setCustomId(EVENT_NO_ID)
+            .setCustomId(`${EVENT_NO_PREFIX}${token}`)
             .setLabel("No")
             .setStyle(ButtonStyle.Secondary)
     );
 }
 
-function buildCloseOutcomeRows() {
-    const row = new ActionRowBuilder();
-    for (const team of TEAM_BUTTONS) {
-        row.addComponents(
+function buildCloseOutcomeRows(config) {
+    const rows = [];
+    let current = new ActionRowBuilder();
+    const outcomes = [
+        ...(config?.recruitment?.teams || [])
+            .filter(Boolean)
+            .slice(0, 24)
+            .map((team, index) => ({
+                id: teamOutcomeId(index),
+                label: team,
+                style: ButtonStyle.Success
+            })),
+        { id: "rejected", label: "Rejected", style: ButtonStyle.Danger }
+    ];
+
+    for (const outcome of outcomes) {
+        if (current.components.length === 5) {
+            rows.push(current);
+            current = new ActionRowBuilder();
+        }
+
+        current.addComponents(
             new ButtonBuilder()
-                .setCustomId(`${CLOSE_TEAM_PREFIX}${team.id}`)
-                .setLabel(team.label)
-                .setStyle(team.style)
+                .setCustomId(`${CLOSE_TEAM_PREFIX}${outcome.id}`)
+                .setLabel(outcome.label)
+                .setStyle(outcome.style)
         );
     }
 
-    return [row];
+    if (current.components.length) rows.push(current);
+    return rows;
 }
 
 function buildTicketControls(config) {
@@ -257,7 +409,62 @@ function threadTypeFor(channel, privateThreads) {
     return privateThreads ? ChannelType.PrivateThread : ChannelType.PublicThread;
 }
 
-async function waitForImageMessage(channel, userId) {
+async function mirrorAttachmentsToDm(client, config, attachments, context) {
+    const recipientId = screenshotDmUserId(config);
+    if (!recipientId) {
+        throw new Error("Screenshot DM user is not configured in the dashboard.");
+    }
+
+    const recipient = await client.users.fetch(recipientId).catch(() => null);
+    if (!recipient) throw new Error("I could not find the configured screenshot DM user.");
+
+    const dm = await recipient.createDM();
+    const mirrored = [];
+
+    for (let index = 0; index < attachments.length; index += 1) {
+        const attachment = attachments[index];
+        const response = await fetch(attachment.url);
+        if (!response.ok) {
+            throw new Error(`Could not download ${attachment.name || "screenshot"} (${response.status}).`);
+        }
+
+        const buffer = Buffer.from(await response.arrayBuffer());
+        const name = safeAttachmentName(
+            attachment.name,
+            `${context.kind || "screenshot"}-${context.userId || "user"}-${index + 1}.png`
+        );
+        const sent = await dm.send({
+            content: [
+                `Recruitment ${context.kind || "screenshot"} upload`,
+                `Applicant: <@${context.userId}> (${context.userTag || context.userId})`,
+                context.guildId ? `Guild: ${context.guildId}` : ""
+            ].filter(Boolean).join("\n"),
+            files: [new AttachmentBuilder(buffer, { name })],
+            allowedMentions: { parse: [] }
+        });
+        const mirroredAttachment = sent.attachments.first();
+        if (!mirroredAttachment?.url) {
+            throw new Error("Discord did not return a URL for the mirrored screenshot.");
+        }
+
+        mirrored.push({
+            ...attachment,
+            name,
+            url: mirroredAttachment.url,
+            proxyUrl: mirroredAttachment.proxyURL || "",
+            contentType: mirroredAttachment.contentType || attachment.contentType || "",
+            size: mirroredAttachment.size || attachment.size || buffer.length,
+            source: "dm-mirror",
+            dmUserId: recipientId,
+            dmMessageId: sent.id,
+            originalUrl: attachment.url
+        });
+    }
+
+    return mirrored;
+}
+
+async function waitForImageMessage(channel, userId, onInvalid = null) {
     return new Promise((resolve, reject) => {
         let settled = false;
         const collector = channel.createMessageCollector({
@@ -268,10 +475,8 @@ async function waitForImageMessage(channel, userId) {
         collector.on("collect", async message => {
             const attachments = extractImageAttachments(message);
             if (!attachments.length) {
-                const warning = await message.reply("Please upload an image file for the screenshot.").catch(() => null);
-                if (warning?.deletable) {
-                    setTimeout(() => warning.delete().catch(() => null), 8000);
-                }
+                await message.delete().catch(() => null);
+                if (onInvalid) await onInvalid().catch(() => null);
                 return;
             }
 
@@ -286,67 +491,117 @@ async function waitForImageMessage(channel, userId) {
     });
 }
 
+async function userHasOpenTicket(config, userId) {
+    const openTickets = await listTickets({ applicantId: userId, status: "open" });
+    const maxOpen = Number(config.recruitment.maxOpenTicketsPerUser || 1);
+    return openTickets.length >= maxOpen ? openTickets[0] : null;
+}
+
 async function collectLicense(interaction) {
-    const key = sessionKey(interaction);
-    const existing = activeSessions.get(key);
-    if (existing) {
+    let config = await loadDashboardConfig();
+    const existingTicket = await userHasOpenTicket(config, interaction.user.id);
+    if (existingTicket) {
         await interaction.reply({
-            content: "You already have an application prompt open in this channel. Please finish that upload first.",
+            content: `You already have an open application ticket: <#${existingTicket.threadId}>`,
             ephemeral: true
         });
         return;
     }
 
+    if (findActiveSession(interaction.guildId, interaction.user.id)) {
+        await interaction.reply({
+            content: "You already have an application upload in progress. Finish that upload or wait for it to time out before pressing **Apply!** again.",
+            ephemeral: true
+        });
+        return;
+    }
+
+    if (!screenshotDmUserId(config)) {
+        await interaction.reply({
+            content: "Recruitment screenshot storage is not configured yet. Ask a manager to set the screenshot DM user in the dashboard.",
+            ephemeral: true
+        });
+        return;
+    }
+
+    if (!config.recruitment.panelMessageId && interaction.message?.id) {
+        config = await saveDashboardConfig({
+            ...config,
+            recruitment: {
+                ...config.recruitment,
+                panelMessageId: interaction.message.id
+            }
+        });
+    }
+
     const session = {
-        key,
+        token: sessionToken(),
         userId: interaction.user.id,
         userTag: displayTag(interaction.user),
+        username: interaction.user.username || interaction.user.globalName || interaction.user.id,
         guildId: interaction.guildId,
         channelId: interaction.channelId,
         licenseAttachments: [],
         eventAttachments: [],
         startedAt: new Date().toISOString()
     };
-
-    activeSessions.set(key, session);
+    rememberSession(session);
 
     await interaction.reply({
-        content: "Please upload an uncropped screenshot of your in-game driver's license in this channel. Make sure your coins and gems are visible too.",
+        content: "Upload your in-game driver's license screenshot in this channel now. I will store it privately and remove your visible upload right away.",
         ephemeral: true
     });
 
     try {
-        const upload = await waitForImageMessage(interaction.channel, interaction.user.id);
-        session.licenseAttachments = upload.attachments;
-        if (upload.message.deletable) await upload.message.delete().catch(() => null);
+        const upload = await waitForImageMessage(interaction.channel, interaction.user.id, () =>
+            interaction.followUp({
+                content: "That message did not include an image attachment, so I removed it. Please upload the driver's license screenshot as an image file.",
+                ephemeral: true
+            })
+        );
+        session.licenseAttachments = await mirrorAttachmentsToDm(interaction.client, config, upload.attachments, {
+            kind: "driver license",
+            userId: interaction.user.id,
+            userTag: displayTag(interaction.user),
+            guildId: interaction.guildId
+        });
+        await upload.message.delete().catch(() => null);
+        await cleanRecruitmentPanelChannel(interaction.client, config).catch(() => null);
 
-        await interaction.followUp({
-            content: "Do you have any recent team event score screenshots with your name highlighted and the team event name visible?",
-            components: [buildEventDecisionRow()],
-            ephemeral: true
+        await interaction.editReply({
+            content: "Driver's license captured. Do you have team event score screenshots to add?",
+            components: [buildEventDecisionRow(session.token)]
         });
     } catch (error) {
-        activeSessions.delete(key);
-        await interaction.followUp({
-            content: "Application timed out because no screenshot was uploaded in time. Press **Apply!** again when you are ready.",
-            ephemeral: true
+        deleteSession(session.token);
+        await interaction.editReply({
+            content: error.message.includes("Timed out")
+                ? "Application timed out because no driver's license image was uploaded in time. Press **Apply!** again when you are ready."
+                : `I could not process that screenshot: ${error.message}`,
+            components: []
         }).catch(() => null);
     }
 }
 
-async function createApplicationThread(interaction, session) {
+async function createApplicationThread(client, session) {
     const config = await loadDashboardConfig();
-    const channel = await interaction.client.channels.fetch(session.channelId).catch(() => null);
+    const channel = await client.channels.fetch(session.channelId).catch(() => null);
     if (!channel?.threads?.create) {
         throw new Error("This channel does not support threads.");
     }
 
+    const user = await client.users.fetch(session.userId).catch(() => ({
+        id: session.userId,
+        username: session.username || session.userTag || session.userId,
+        tag: session.userTag || session.userId
+    }));
+
     const threadType = threadTypeFor(channel, config.recruitment.privateThreads);
     const threadOptions = {
-        name: safeThreadName(interaction.user),
+        name: safeThreadName(user),
         autoArchiveDuration: config.recruitment.threadAutoArchiveMinutes,
         type: threadType,
-        reason: `Recruitment application from ${displayTag(interaction.user)}`
+        reason: `Recruitment application from ${displayTag(user)}`
     };
 
     if (threadType === ChannelType.PrivateThread) {
@@ -355,12 +610,12 @@ async function createApplicationThread(interaction, session) {
 
     const thread = await channel.threads.create(threadOptions);
 
-    await thread.members.add(interaction.user.id).catch(() => null);
+    await thread.members.add(session.userId).catch(() => null);
 
-    const roleId = recruiterRoleId();
+    const roleId = recruiterRoleId(config);
     const intro = roleId
-        ? `<@&${roleId}> New recruitment application from <@${interaction.user.id}>.`
-        : `New recruitment application from <@${interaction.user.id}>. Configure RECRUITER_ROLE_ID to ping recruiters.`;
+        ? `<@&${roleId}> New recruitment application from <@${session.userId}>.`
+        : `New recruitment application from <@${session.userId}>. Configure the recruiter role in the dashboard to ping recruiters.`;
 
     await thread.send({
         content: intro,
@@ -371,23 +626,41 @@ async function createApplicationThread(interaction, session) {
     const ticket = await saveTicket({
         threadId: thread.id,
         channelId: channel.id,
-        guildId: interaction.guildId,
-        applicantId: interaction.user.id,
-        applicantTag: displayTag(interaction.user),
+        guildId: session.guildId,
+        applicantId: session.userId,
+        applicantTag: displayTag(user),
+        applicantUsername: user.username || session.username || "",
         status: "open",
         claimedById: "",
         claimedByTag: "",
+        addedUserIds: [],
         licenseAttachments: session.licenseAttachments,
         eventAttachments: session.eventAttachments,
         createdAt: new Date().toISOString()
     });
 
+    await logAction(client, {
+        type: "ticket",
+        title: "Recruitment Ticket Created",
+        message: `<@${session.userId}> opened a recruitment application thread.`,
+        guildId: session.guildId,
+        actorId: session.userId,
+        actorTag: displayTag(user),
+        metadata: { threadId: thread.id, channelId: channel.id }
+    });
+
     return { thread, ticket };
 }
 
+function sessionFromEventButton(interaction, prefix) {
+    const token = interaction.customId.slice(prefix.length);
+    const session = activeSessions.get(token);
+    if (!session || session.userId !== interaction.user.id) return null;
+    return session;
+}
+
 async function completeWithoutEvents(interaction) {
-    const key = sessionKey(interaction);
-    const session = activeSessions.get(key);
+    const session = sessionFromEventButton(interaction, EVENT_NO_PREFIX);
     if (!session) {
         await interaction.reply({
             content: "That application prompt expired. Press **Apply!** again when you are ready.",
@@ -402,14 +675,14 @@ async function completeWithoutEvents(interaction) {
     });
 
     try {
-        const { thread } = await createApplicationThread(interaction, session);
-        activeSessions.delete(key);
+        const { thread } = await createApplicationThread(interaction.client, session);
+        deleteSession(session.token);
         await interaction.followUp({
             content: `Your application ticket has been created: <#${thread.id}>`,
             ephemeral: true
         });
     } catch (error) {
-        activeSessions.delete(key);
+        deleteSession(session.token);
         await interaction.followUp({
             content: `I could not create the ticket: ${error.message}`,
             ephemeral: true
@@ -418,8 +691,7 @@ async function completeWithoutEvents(interaction) {
 }
 
 async function collectEventScreenshots(interaction) {
-    const key = sessionKey(interaction);
-    const session = activeSessions.get(key);
+    const session = sessionFromEventButton(interaction, EVENT_YES_PREFIX);
     if (!session) {
         await interaction.reply({
             content: "That application prompt expired. Press **Apply!** again when you are ready.",
@@ -429,33 +701,47 @@ async function collectEventScreenshots(interaction) {
     }
 
     await interaction.update({
-        content: "Please upload the team event score screenshots in this channel. Include the highlighted name and visible team event name.",
+        content: "Upload the team event score screenshots in this channel now. I will store them privately and remove the visible upload right away.",
         components: []
     });
 
     try {
-        const upload = await waitForImageMessage(interaction.channel, interaction.user.id);
-        session.eventAttachments = upload.attachments;
-        if (upload.message.deletable) await upload.message.delete().catch(() => null);
+        const config = await loadDashboardConfig();
+        const upload = await waitForImageMessage(interaction.channel, interaction.user.id, () =>
+            interaction.followUp({
+                content: "That message did not include an image attachment, so I removed it. Please upload the team event scores as image files.",
+                ephemeral: true
+            })
+        );
+        session.eventAttachments = await mirrorAttachmentsToDm(interaction.client, config, upload.attachments, {
+            kind: "team event scores",
+            userId: interaction.user.id,
+            userTag: displayTag(interaction.user),
+            guildId: interaction.guildId
+        });
+        await upload.message.delete().catch(() => null);
+        await cleanRecruitmentPanelChannel(interaction.client, config).catch(() => null);
 
-        const { thread } = await createApplicationThread(interaction, session);
-        activeSessions.delete(key);
+        const { thread } = await createApplicationThread(interaction.client, session);
+        deleteSession(session.token);
         await interaction.followUp({
             content: `Your application ticket has been created: <#${thread.id}>`,
             ephemeral: true
         });
     } catch (error) {
-        activeSessions.delete(key);
+        deleteSession(session.token);
         await interaction.followUp({
-            content: "Application timed out because no team event screenshot was uploaded in time. Press **Apply!** again when you are ready.",
+            content: error.message.includes("Timed out")
+                ? "Application timed out because no team event screenshot was uploaded in time. Press **Apply!** again when you are ready."
+                : `I could not process those screenshots: ${error.message}`,
             ephemeral: true
         }).catch(() => null);
     }
 }
 
-function memberCanRecruit(member) {
+function memberCanRecruit(member, config = null) {
     if (!member) return false;
-    const roleId = recruiterRoleId();
+    const roleId = recruiterRoleId(config);
     const hasRole = roleId && member.roles?.cache?.has(roleId);
     const permissions = member.permissions;
 
@@ -468,41 +754,64 @@ function memberCanRecruit(member) {
 }
 
 async function requireRecruiter(interaction) {
+    const config = await loadDashboardConfig();
     const member = interaction.member?.roles?.cache
         ? interaction.member
         : await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
 
-    if (memberCanRecruit(member)) return true;
+    if (memberCanRecruit(member, config)) return true;
 
-    await interaction.reply({
-        content: "Only recruiters can use these ticket controls.",
-        ephemeral: true
-    }).catch(() => null);
+    await respondEphemeral(interaction, "Only recruiters can use these ticket controls.").catch(() => null);
     return false;
+}
+
+async function getTicketContext(interaction) {
+    const thread = interaction.channel;
+    if (!thread?.isThread?.()) {
+        await respondEphemeral(interaction, "Recruitment ticket commands must be used inside a ticket thread.");
+        return null;
+    }
+
+    const ticket = await getTicket(thread.id);
+    if (!ticket) {
+        await respondEphemeral(interaction, "I could not find a ticket record for this thread.");
+        return null;
+    }
+
+    return { thread, ticket };
 }
 
 async function claimTicket(interaction) {
     if (!(await requireRecruiter(interaction))) return;
 
-    const ticket = await getTicket(interaction.channelId);
-    if (!ticket) {
-        await interaction.reply({
-            content: "I could not find a ticket record for this thread.",
-            ephemeral: true
-        });
+    const context = await getTicketContext(interaction);
+    if (!context) return;
+
+    const { thread, ticket } = context;
+    if (ticket.status === "closed") {
+        await respondEphemeral(interaction, "This ticket is already closed.");
         return;
     }
 
-    const updated = await updateTicket(interaction.channelId, {
+    const updated = await updateTicket(thread.id, {
         claimedById: interaction.user.id,
         claimedByTag: displayTag(interaction.user)
     });
 
-    await interaction.channel.send(`Ticket claimed by <@${interaction.user.id}>.`);
-    await interaction.reply({
-        content: `Ticket claimed for ${updated.applicantTag}.`,
-        ephemeral: true
+    await thread.send(`Ticket claimed by <@${interaction.user.id}>.`);
+    await logAction(interaction.client, {
+        type: "ticket",
+        title: "Recruitment Ticket Claimed",
+        message: `<@${interaction.user.id}> claimed the ticket for <@${ticket.applicantId}>.`,
+        guildId: ticket.guildId,
+        actorId: interaction.user.id,
+        actorTag: displayTag(interaction.user),
+        targetId: ticket.applicantId,
+        targetTag: ticket.applicantTag,
+        metadata: { threadId: thread.id }
     });
+
+    await respondEphemeral(interaction, `Ticket claimed for ${updated.applicantTag}.`);
 }
 
 async function sendTutorial(interaction, tutorialId) {
@@ -512,118 +821,298 @@ async function sendTutorial(interaction, tutorialId) {
     const tutorial = config.recruitment.tutorials.find(item => item.id === tutorialId && item.enabled);
 
     if (!tutorial) {
-        await interaction.reply({
-            content: "That tutorial is not configured anymore.",
-            ephemeral: true
-        });
+        await respondEphemeral(interaction, "That tutorial is not configured anymore.");
         return;
     }
 
     if (!tutorial.videoUrl) {
-        await interaction.reply({
-            content: `No video has been uploaded for **${tutorial.label}** yet.`,
-            ephemeral: true
-        });
+        await respondEphemeral(interaction, `No video has been uploaded for **${tutorial.label}** yet.`);
         return;
     }
 
-    const ticket = await getTicket(interaction.channelId);
+    const context = await getTicketContext(interaction);
+    if (!context) return;
+
+    const { thread, ticket } = context;
     const applicantMention = ticket?.applicantId ? `<@${ticket.applicantId}> ` : "";
 
-    await interaction.channel.send({
+    await thread.send({
         content: `${applicantMention}${tutorial.description || tutorial.label}\n${tutorial.videoUrl}`
     });
 
-    await interaction.reply({
-        content: `Sent **${tutorial.label}** to the ticket.`,
-        ephemeral: true
+    await logAction(interaction.client, {
+        type: "ticket",
+        title: "Recruitment Tutorial Sent",
+        message: `<@${interaction.user.id}> sent **${tutorial.label}** in a ticket.`,
+        guildId: interaction.guildId,
+        actorId: interaction.user.id,
+        actorTag: displayTag(interaction.user),
+        targetId: ticket?.applicantId || "",
+        targetTag: ticket?.applicantTag || "",
+        metadata: { threadId: thread.id, tutorialId }
     });
+
+    await respondEphemeral(interaction, `Sent **${tutorial.label}** to the ticket.`);
+}
+
+function renderInviteMessage(template, ticket, inviteUrl, serverName) {
+    const userMention = `<@${ticket.applicantId}>`;
+    let content = String(template || "{user} Join **{server}** here: {invite}")
+        .replaceAll("{user}", userMention)
+        .replaceAll("{invite}", inviteUrl)
+        .replaceAll("{server}", serverName || "the server");
+
+    if (!content.includes(userMention)) content = `${userMention} ${content}`;
+    if (!content.includes(inviteUrl)) content = `${content}\n${inviteUrl}`;
+    return content.slice(0, 2000);
+}
+
+async function sendInviteToApplicant(interaction) {
+    if (!(await requireRecruiter(interaction))) return;
+
+    const context = await getTicketContext(interaction);
+    if (!context) return;
+
+    const { thread, ticket } = context;
+    if (ticket.status === "closed" || ticket.status === "archived" || ticket.status === "deleted") {
+        await respondEphemeral(interaction, "This ticket is already closed.");
+        return;
+    }
+
+    const config = await loadDashboardConfig();
+    const inviteChannelId = config.recruitment.inviteChannelId;
+    if (!inviteChannelId) {
+        await respondEphemeral(interaction, "Configure the destination invite channel in the dashboard first.");
+        return;
+    }
+
+    const channel = await interaction.client.channels.fetch(inviteChannelId).catch(() => null);
+    if (!channel?.createInvite) {
+        await respondEphemeral(interaction, "I could not access an invite-capable channel for the destination server.");
+        return;
+    }
+
+    if (config.recruitment.inviteGuildId && channel.guild?.id !== config.recruitment.inviteGuildId) {
+        await respondEphemeral(interaction, "The configured invite channel does not belong to the configured destination server.");
+        return;
+    }
+
+    const invite = await channel.createInvite({
+        maxAge: 0,
+        maxUses: 1,
+        unique: true,
+        reason: `Recruitment invite for ${ticket.applicantTag || ticket.applicantId}`
+    });
+    const inviteUrl = invite.url || `https://discord.gg/${invite.code}`;
+    const content = renderInviteMessage(
+        config.recruitment.inviteMessage,
+        ticket,
+        inviteUrl,
+        channel.guild?.name || "the server"
+    );
+
+    await thread.send({
+        content,
+        allowedMentions: { users: [ticket.applicantId], roles: [] }
+    });
+
+    await updateTicket(thread.id, {
+        lastInviteAt: new Date().toISOString(),
+        lastInviteById: interaction.user.id,
+        lastInviteByTag: displayTag(interaction.user),
+        lastInviteGuildId: channel.guild?.id || "",
+        lastInviteChannelId: channel.id
+    });
+
+    await logAction(interaction.client, {
+        type: "ticket",
+        title: "Recruitment Invite Sent",
+        message: `<@${interaction.user.id}> sent a single-use invite to <@${ticket.applicantId}>.`,
+        guildId: ticket.guildId,
+        actorId: interaction.user.id,
+        actorTag: displayTag(interaction.user),
+        targetId: ticket.applicantId,
+        targetTag: ticket.applicantTag,
+        metadata: {
+            threadId: thread.id,
+            inviteGuildId: channel.guild?.id || "",
+            inviteChannelId: channel.id
+        }
+    });
+
+    await respondEphemeral(interaction, `Sent a single-use invite to ${ticket.applicantTag || ticket.applicantId}.`);
 }
 
 async function startClose(interaction) {
     if (!(await requireRecruiter(interaction))) return;
 
-    await interaction.reply({
+    const config = await loadDashboardConfig();
+    await respondEphemeral(interaction, {
         content: "Select the final recruitment outcome for this applicant.",
-        components: buildCloseOutcomeRows(),
-        ephemeral: true
+        components: buildCloseOutcomeRows(config)
     });
 }
 
-function outcomeFromId(outcomeId) {
-    return TEAM_BUTTONS.find(team => team.id === outcomeId) || null;
+function outcomeFromId(outcomeId, config) {
+    if (outcomeId === "rejected") return { id: "rejected", label: "Rejected", team: "", style: ButtonStyle.Danger };
+
+    const configuredTeam = teamNameFromOutcomeId(outcomeId, config);
+    if (configuredTeam) {
+        const team = (config?.recruitment?.teams || []).find(item => item === configuredTeam) || configuredTeam;
+        return { id: outcomeId, label: team, team, style: ButtonStyle.Success };
+    }
+
+    return RECRUITMENT_OUTCOMES.find(team => team.id === outcomeId) || null;
 }
 
-function attachmentLinks(ticket) {
-    const attachments = [
-        ...(ticket.licenseAttachments || []),
-        ...(ticket.eventAttachments || [])
-    ];
+async function fetchThreadMessages(thread, limit = 250) {
+    const collected = [];
+    let before;
 
-    return attachments
-        .slice(0, 10)
-        .map((attachment, index) => `[${attachment.name || `Screenshot ${index + 1}`}](${attachment.url})`)
-        .join("\n");
+    while (collected.length < limit) {
+        const batch = await thread.messages.fetch({ limit: Math.min(100, limit - collected.length), before }).catch(() => null);
+        if (!batch?.size) break;
+
+        collected.push(...batch.values());
+        before = batch.last()?.id;
+        if (batch.size < 100) break;
+    }
+
+    return collected.sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 }
 
-async function sendRecruitmentLog(client, config, ticket, logEntry) {
-    if (!config.recruitment.logChannelId) return;
+function transcriptLine(message) {
+    const author = message.author?.tag || message.author?.username || message.author?.id || "Unknown";
+    const attachments = [...message.attachments.values()].map(item => item.url);
+    const embeds = message.embeds.flatMap(embed => [
+        embed.title,
+        embed.description,
+        embed.url,
+        embed.image?.url,
+        embed.thumbnail?.url,
+        ...(embed.fields || []).flatMap(field => [`${field.name}: ${field.value}`])
+    ]).filter(Boolean);
+    const content = String(message.content || "").replace(/\s+/g, " ").trim();
+    const extras = [...attachments, ...embeds].join(" ");
 
-    const channel = await client.channels.fetch(config.recruitment.logChannelId).catch(() => null);
+    return `[${message.createdAt.toISOString()}] ${author}: ${content}${extras ? ` ${extras}` : ""}`.trim();
+}
+
+async function createTranscript(thread, limit = 250) {
+    if (!thread?.messages?.fetch) return "";
+
+    const collected = await fetchThreadMessages(thread, limit);
+    return collected
+        .map(transcriptLine)
+        .join("\n")
+        .slice(0, 300000);
+}
+
+async function collectApplicantThreadImages(thread, applicantId, limit = 250) {
+    if (!thread?.messages?.fetch) return [];
+
+    const seen = new Set();
+    const messages = await fetchThreadMessages(thread, limit);
+    const images = [];
+
+    for (const message of messages) {
+        if (message.author?.id !== applicantId) continue;
+
+        const attachments = extractImageAttachments(message);
+        const embedImages = message.embeds.flatMap(embed => [embed.image?.url, embed.thumbnail?.url]).filter(Boolean);
+        const candidates = [
+            ...attachments.map(attachment => ({
+                id: attachment.id,
+                name: attachment.name,
+                url: attachment.url,
+                contentType: attachment.contentType,
+                size: attachment.size
+            })),
+            ...embedImages.map((url, index) => ({
+                id: `${message.id}-embed-${index}`,
+                name: "embedded-image",
+                url,
+                contentType: "",
+                size: 0
+            }))
+        ];
+
+        for (const image of candidates) {
+            if (!image.url || seen.has(image.url)) continue;
+            seen.add(image.url);
+            images.push({
+                ...image,
+                messageId: message.id,
+                authorId: message.author.id,
+                createdAt: message.createdAt.toISOString()
+            });
+        }
+    }
+
+    return images.slice(0, 50);
+}
+
+async function sendRecruitmentLog(client, config, ticket, applicantImages = []) {
+    const channelId = config.recruitment.logChannelId || config.logging.channelId;
+    if (!channelId || !applicantImages.length) return;
+
+    const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel?.isTextBased?.()) return;
 
-    const accepted = logEntry.outcome === "accepted";
-    const embed = new EmbedBuilder()
-        .setTitle(accepted ? "Recruitment Accepted" : "Recruitment Rejected")
-        .setColor(accepted ? 0x147341 : 0xb42318)
-        .addFields(
-            { name: "Applicant", value: `<@${ticket.applicantId}> (${ticket.applicantTag || ticket.applicantId})`, inline: false },
-            { name: "Closed By", value: `<@${logEntry.closedById}> (${logEntry.closedByTag})`, inline: true },
-            { name: "Outcome", value: accepted ? logEntry.team : "Rejected", inline: true },
-            { name: "Thread", value: `<#${ticket.threadId}>`, inline: true }
-        )
-        .setTimestamp(new Date(logEntry.closedAt));
-
-    const links = attachmentLinks(ticket);
-    if (links) embed.addFields({ name: "Screenshots", value: links.slice(0, 1000), inline: false });
-    if (ticket.licenseAttachments?.[0]?.url) embed.setImage(ticket.licenseAttachments[0].url);
-
-    await channel.send({ embeds: [embed] });
+    for (let index = 0; index < applicantImages.length; index += 10) {
+        const embeds = applicantImages.slice(index, index + 10).map(image =>
+            new EmbedBuilder()
+                .setImage(image.url)
+                .setColor(colorToNumber(config.recruitment.panelColor))
+        );
+        await channel.send({ embeds, allowedMentions: { parse: [] } });
+    }
 }
 
 async function finishClose(interaction, outcomeId) {
     if (!(await requireRecruiter(interaction))) return;
 
-    const outcome = outcomeFromId(outcomeId);
+    const config = await loadDashboardConfig();
+    const outcome = outcomeFromId(outcomeId, config);
     if (!outcome) {
-        await interaction.reply({ content: "Unknown recruitment outcome.", ephemeral: true });
+        await respondEphemeral(interaction, "Unknown recruitment outcome.");
         return;
     }
 
-    const thread = interaction.channel;
-    if (!thread?.isThread?.()) {
-        await interaction.reply({ content: "Tickets can only be closed from inside their thread.", ephemeral: true });
-        return;
-    }
+    const context = await getTicketContext(interaction);
+    if (!context) return;
 
-    const ticket = await getTicket(thread.id);
-    if (!ticket) {
-        await interaction.reply({
-            content: "I could not find a ticket record for this thread.",
-            ephemeral: true
-        });
+    const { thread, ticket } = context;
+    if (ticket.status === "closed") {
+        await respondEphemeral(interaction, "This ticket is already closed.");
         return;
     }
 
     const accepted = Boolean(outcome.team);
     const closedAt = new Date().toISOString();
+    const transcriptText = config.recruitment.transcriptOnClose ? await createTranscript(thread) : "";
+    const transcriptLines = transcriptText ? transcriptText.split("\n").filter(Boolean).length : 0;
+    const applicantThreadImages = [
+        ...(ticket.licenseAttachments || []),
+        ...(ticket.eventAttachments || []),
+        ...(await collectApplicantThreadImages(thread, ticket.applicantId))
+    ].filter((image, index, list) => image?.url && list.findIndex(item => item.url === image.url) === index);
+
     const updatedTicket = await updateTicket(thread.id, {
         status: "closed",
         closedAt,
         closedById: interaction.user.id,
         closedByTag: displayTag(interaction.user),
         outcome: accepted ? "accepted" : "rejected",
-        team: outcome.team
+        team: outcome.team,
+        transcriptSaved: Boolean(transcriptText),
+        transcript: transcriptText ? {
+            text: transcriptText,
+            createdAt: closedAt,
+            lineCount: transcriptLines
+        } : null,
+        transcriptPreview: transcriptText.slice(0, 10000),
+        applicantThreadImages
     });
 
     const logEntry = await appendRecruitmentLog({
@@ -639,18 +1128,57 @@ async function finishClose(interaction, outcomeId) {
         closedAt,
         createdAt: ticket.createdAt,
         licenseAttachments: ticket.licenseAttachments || [],
-        eventAttachments: ticket.eventAttachments || []
+        eventAttachments: ticket.eventAttachments || [],
+        applicantThreadImages,
+        transcriptSaved: Boolean(transcriptText),
+        transcriptLineCount: transcriptLines,
+        transcriptPreview: transcriptText.slice(0, 10000)
     });
 
-    const config = await loadDashboardConfig();
-    await sendRecruitmentLog(interaction.client, config, updatedTicket || ticket, logEntry).catch(error => {
-        console.error("Failed to send recruitment log:", error);
+    await sendRecruitmentLog(interaction.client, config, updatedTicket || ticket, applicantThreadImages).catch(error => {
+        console.error("Failed to send recruitment images:", error);
     });
+
+    await logAction(interaction.client, {
+        type: "ticket",
+        title: accepted ? "Recruitment Ticket Accepted" : "Recruitment Ticket Rejected",
+        message: accepted
+            ? `<@${ticket.applicantId}> was recruited to **${outcome.team}**.`
+            : `<@${ticket.applicantId}> was rejected.`,
+        guildId: ticket.guildId,
+        actorId: interaction.user.id,
+        actorTag: displayTag(interaction.user),
+        targetId: ticket.applicantId,
+        targetTag: ticket.applicantTag,
+        metadata: {
+            threadId: thread.id,
+            outcome: accepted ? "accepted" : "rejected",
+            team: outcome.team,
+            recruitmentLogId: logEntry.id
+        }
+    });
+
+    if (accepted && config.memberCounts?.updateOnRecruitmentClose) {
+        await incrementTeamCount(interaction.client, outcome.team, 1, interaction.user).catch(error => {
+            console.error("Failed to update member count after recruitment close:", error.message);
+        });
+    }
+
+    if (accepted) {
+        await queueTeamRoleAssignment(interaction.client, {
+            userId: ticket.applicantId,
+            teamName: outcome.team,
+            ticketId: ticket.threadId,
+            actor: interaction.user
+        }).catch(error => {
+            console.error("Failed to queue team role assignment:", error.message);
+        });
+    }
 
     const outcomeText = accepted ? `recruited to **${outcome.team}**` : "rejected";
     await thread.send(`Ticket closed by <@${interaction.user.id}>. Applicant was ${outcomeText}.`);
 
-    await interaction.update({
+    await acknowledgeCloseSelection(interaction, {
         content: `Ticket closed. Outcome: ${accepted ? outcome.team : "Rejected"}.`,
         components: []
     });
@@ -659,8 +1187,200 @@ async function finishClose(interaction, outcomeId) {
     await thread.setArchived(true, "Recruitment ticket closed").catch(() => null);
 }
 
+async function addUsersToTicket(interaction, users) {
+    if (!(await requireRecruiter(interaction))) return;
+
+    const context = await getTicketContext(interaction);
+    if (!context) return;
+
+    const { thread, ticket } = context;
+    const uniqueUsers = [...new Map(users.filter(Boolean).map(user => [user.id, user])).values()].slice(0, 25);
+    if (!uniqueUsers.length) {
+        await respondEphemeral(interaction, "No valid users were provided.");
+        return;
+    }
+
+    const added = [];
+    const failed = [];
+    for (const user of uniqueUsers) {
+        try {
+            await thread.members.add(user.id);
+            added.push(user.id);
+        } catch (error) {
+            failed.push(`${displayTag(user)} (${error.message})`);
+        }
+    }
+
+    const nextAdded = [...new Set([...(ticket.addedUserIds || []), ...added])];
+    await updateTicket(thread.id, { addedUserIds: nextAdded });
+
+    if (added.length) {
+        await thread.send(`Added ${added.map(id => `<@${id}>`).join(", ")} to the ticket.`);
+        await logAction(interaction.client, {
+            type: "ticket",
+            title: "Users Added To Recruitment Ticket",
+            message: `<@${interaction.user.id}> added ${added.length} user(s) to a ticket.`,
+            guildId: ticket.guildId,
+            actorId: interaction.user.id,
+            actorTag: displayTag(interaction.user),
+            targetId: ticket.applicantId,
+            targetTag: ticket.applicantTag,
+            metadata: { threadId: thread.id, addedUserIds: added }
+        });
+    }
+
+    await respondEphemeral(interaction, [
+        added.length ? `Added: ${added.map(id => `<@${id}>`).join(", ")}` : "No users were added.",
+        failed.length ? `Failed: ${failed.join("; ")}` : ""
+    ].filter(Boolean).join("\n"));
+}
+
+async function addUserToTicket(interaction, user) {
+    await addUsersToTicket(interaction, [user]);
+}
+
+async function massAddUsersToTicket(interaction, rawValue) {
+    const ids = [...new Set(String(rawValue || "").match(/\d{10,25}/g) || [])].slice(0, 25);
+    const users = [];
+
+    for (const id of ids) {
+        const user = await interaction.client.users.fetch(id).catch(() => null);
+        if (user) users.push(user);
+    }
+
+    await addUsersToTicket(interaction, users);
+}
+
+async function removeUserFromTicket(interaction, user) {
+    if (!(await requireRecruiter(interaction))) return;
+
+    const context = await getTicketContext(interaction);
+    if (!context) return;
+
+    const { thread, ticket } = context;
+    await thread.members.remove(user.id).catch(() => null);
+    await updateTicket(thread.id, {
+        addedUserIds: (ticket.addedUserIds || []).filter(id => id !== user.id)
+    });
+
+    await thread.send(`Removed <@${user.id}> from the ticket.`);
+    await logAction(interaction.client, {
+        type: "ticket",
+        title: "User Removed From Recruitment Ticket",
+        message: `<@${interaction.user.id}> removed <@${user.id}> from a ticket.`,
+        guildId: ticket.guildId,
+        actorId: interaction.user.id,
+        actorTag: displayTag(interaction.user),
+        targetId: user.id,
+        targetTag: displayTag(user),
+        metadata: { threadId: thread.id, applicantId: ticket.applicantId }
+    });
+
+    await respondEphemeral(interaction, `Removed <@${user.id}> from this ticket.`);
+}
+
+async function renameTicket(interaction, rawName) {
+    if (!(await requireRecruiter(interaction))) return;
+
+    const context = await getTicketContext(interaction);
+    if (!context) return;
+
+    const { thread, ticket } = context;
+    const name = safeTicketName(rawName);
+    if (!name) {
+        await respondEphemeral(interaction, "Please provide a valid thread name.");
+        return;
+    }
+
+    await thread.setName(name, `Recruitment ticket renamed by ${displayTag(interaction.user)}`);
+    await updateTicket(thread.id, { renamedAt: new Date().toISOString(), renamedById: interaction.user.id });
+    await thread.send(`Ticket renamed to **${name}** by <@${interaction.user.id}>.`);
+
+    await logAction(interaction.client, {
+        type: "ticket",
+        title: "Recruitment Ticket Renamed",
+        message: `<@${interaction.user.id}> renamed a ticket to **${name}**.`,
+        guildId: ticket.guildId,
+        actorId: interaction.user.id,
+        actorTag: displayTag(interaction.user),
+        targetId: ticket.applicantId,
+        targetTag: ticket.applicantTag,
+        metadata: { threadId: thread.id, name }
+    });
+
+    await respondEphemeral(interaction, `Renamed this ticket to **${name}**.`);
+}
+
+async function deleteTicket(interaction) {
+    if (!(await requireRecruiter(interaction))) return;
+
+    const context = await getTicketContext(interaction);
+    if (!context) return;
+
+    const { thread, ticket } = context;
+    await updateTicket(thread.id, {
+        status: "deleted",
+        deletedAt: new Date().toISOString(),
+        deletedById: interaction.user.id,
+        deletedByTag: displayTag(interaction.user)
+    });
+
+    await logAction(interaction.client, {
+        type: "ticket",
+        title: "Recruitment Ticket Deleted",
+        message: `<@${interaction.user.id}> deleted the ticket for <@${ticket.applicantId}>.`,
+        guildId: ticket.guildId,
+        actorId: interaction.user.id,
+        actorTag: displayTag(interaction.user),
+        targetId: ticket.applicantId,
+        targetTag: ticket.applicantTag,
+        metadata: { threadId: thread.id }
+    });
+
+    await respondEphemeral(interaction, "Deleting this ticket thread now.");
+    await thread.delete("Recruitment ticket deleted by recruiter").catch(async () => {
+        await thread.setLocked(true, "Recruitment ticket deleted by recruiter").catch(() => null);
+        await thread.setArchived(true, "Recruitment ticket deleted by recruiter").catch(() => null);
+    });
+}
+
+async function archiveTicket(interaction) {
+    if (!(await requireRecruiter(interaction))) return;
+
+    const context = await getTicketContext(interaction);
+    if (!context) return;
+
+    const { thread, ticket } = context;
+    await updateTicket(thread.id, {
+        status: ticket.status === "closed" ? "closed" : "archived",
+        archivedAt: new Date().toISOString(),
+        archivedById: interaction.user.id,
+        archivedByTag: displayTag(interaction.user)
+    });
+
+    await logAction(interaction.client, {
+        type: "ticket",
+        title: "Recruitment Ticket Archived",
+        message: `<@${interaction.user.id}> archived the ticket for <@${ticket.applicantId}>.`,
+        guildId: ticket.guildId,
+        actorId: interaction.user.id,
+        actorTag: displayTag(interaction.user),
+        targetId: ticket.applicantId,
+        targetTag: ticket.applicantTag,
+        metadata: { threadId: thread.id }
+    });
+
+    await respondEphemeral(interaction, "Archiving this ticket thread now.");
+    await thread.setLocked(true, "Recruitment ticket archived").catch(() => null);
+    await thread.setArchived(true, "Recruitment ticket archived").catch(() => null);
+}
+
 async function handleRecruitmentInteraction(interaction) {
-    if (!interaction.isButton() || !interaction.customId.startsWith("recruitment:")) {
+    if (!interaction.isButton() && !interaction.isModalSubmit()) {
+        return false;
+    }
+
+    if (!interaction.customId.startsWith("recruitment:")) {
         return false;
     }
 
@@ -676,9 +1396,9 @@ async function handleRecruitmentInteraction(interaction) {
 
         if (customId === APPLY_BUTTON_ID) {
             await collectLicense(interaction);
-        } else if (customId === EVENT_YES_ID) {
+        } else if (customId.startsWith(EVENT_YES_PREFIX)) {
             await collectEventScreenshots(interaction);
-        } else if (customId === EVENT_NO_ID) {
+        } else if (customId.startsWith(EVENT_NO_PREFIX)) {
             await completeWithoutEvents(interaction);
         } else if (customId === CLAIM_ID) {
             await claimTicket(interaction);
@@ -691,7 +1411,7 @@ async function handleRecruitmentInteraction(interaction) {
         }
     } catch (error) {
         console.error("Recruitment interaction failed:", error);
-        const payload = { content: `Recruitment action failed: ${error.message}`, ephemeral: true };
+        const payload = { content: `Recruitment action failed: ${error.message}`, ephemeral: Boolean(interaction.guildId) };
 
         if (interaction.deferred || interaction.replied) {
             await interaction.followUp(payload).catch(() => null);
@@ -705,8 +1425,20 @@ async function handleRecruitmentInteraction(interaction) {
 
 module.exports = {
     APPLY_BUTTON_ID,
+    RECRUITMENT_OUTCOMES,
+    addUserToTicket,
+    archiveTicket,
     buildPanelPayload,
+    claimTicket,
+    deleteTicket,
     ensureRecruitmentPanel,
+    finishClose,
     handleRecruitmentInteraction,
-    memberCanRecruit
+    massAddUsersToTicket,
+    memberCanRecruit,
+    removeUserFromTicket,
+    renameTicket,
+    sendInviteToApplicant,
+    sendTutorial,
+    startClose
 };

@@ -10,21 +10,15 @@ const {
     ensureRecruitmentPanel,
     handleRecruitmentInteraction
 } = require("./utils/recruitmentManager");
+const { syncRecruitmentBanList } = require("./utils/recruitmentBanPanel");
+const { syncMemberCountMessage } = require("./utils/memberCountManager");
+const { startTeamRoleScheduler } = require("./utils/teamRoleScheduler");
+const { handleWelcomeTeamButton } = require("./utils/welcomeRoleManager");
+const { startYouTubeNotifier } = require("./utils/youtubeManager");
 
 // Error handlers
 process.on("unhandledRejection", reason => console.error("Unhandled Rejection:", reason));
 process.on("uncaughtException", err => console.error("Uncaught Exception:", err));
-
-// Initialize YouTube Notifier with timeout protection
-try {
-    const youtubeNotifierPromise = Promise.resolve(require("./youtube/youtubeNotifier.js"));
-    Promise.race([
-        youtubeNotifierPromise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error("YT Notifier timeout after 10s")), 10000))
-      ]).catch(err => console.error("❌ YouTube Notifier error:", err.message));
- } catch (err) {
-     console.error("❌ Failed to load YouTube Notifier:", err);
-  }
 
 // Client Setup
 const client = new Client({
@@ -34,7 +28,8 @@ const client = new Client({
         GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildMessageReactions,
         GatewayIntentBits.GuildBans,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages
     ],
     partials: [
     Partials.Message,
@@ -177,6 +172,14 @@ client.on("interactionCreate", async interaction => {
     if (interaction.isButton()) {
         const handled = await handleRecruitmentInteraction(interaction);
         if (handled) return;
+
+        const welcomeHandled = await handleWelcomeTeamButton(interaction);
+        if (welcomeHandled) return;
+    }
+
+    if (interaction.isModalSubmit()) {
+        const handled = await handleRecruitmentInteraction(interaction);
+        if (handled) return;
     }
 });
 
@@ -224,6 +227,32 @@ client.once("ready", async () => {
     } catch (err) {
         console.error("Recruitment panel sync error:", err.message);
     }
+
+    console.log("Syncing member count message...");
+
+    try {
+        const sync = await Promise.race([
+            syncMemberCountMessage(client, { silent: true }),
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("Member count sync timeout after 20s")), 20000)
+            )
+        ]);
+
+        if (sync.skipped) {
+            console.log(`Member count sync skipped: ${sync.reason}`);
+        } else {
+            console.log(`Member count message ready in ${sync.channelId} (${sync.messageId}).`);
+        }
+    } catch (err) {
+        console.error("Member count sync error:", err.message);
+    }
+
+    startYouTubeNotifier(client);
+    startTeamRoleScheduler(client);
+
+    syncRecruitmentBanList(client).catch(error => {
+        console.error("Recruitment ban list sync error:", error.message);
+    });
 });
 
 // Handle unexpected disconnections
@@ -286,7 +315,7 @@ app.listen(PORT, () => console.log(`🌐 Web server running on ${PORT}`));
 
 // Single login call
 console.log("📡 Attempting Discord connection...");
-console.log(`Token: ${process.env.DISCORD_TOKEN ? process.env.DISCORD_TOKEN.substring(0, 10) + "..." : "MISSING"}`);
+console.log(`Token configured: ${process.env.DISCORD_TOKEN ? "yes" : "no"}`);
 client.login(process.env.DISCORD_TOKEN);
 
 let attempts = 0;

@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const { getGuildMember } = require("./discordApi");
+const { loadDashboardConfig } = require("./dashboardConfig");
 
 const DISCORD_API = "https://discord.com/api/v10";
 const SESSION_COOKIE = "dca_dashboard_session";
@@ -15,11 +16,16 @@ if (!process.env.DASHBOARD_SESSION_SECRET) {
     console.warn("DASHBOARD_SESSION_SECRET is missing. Dashboard sessions will reset when the process restarts.");
 }
 
-function getAllowedRoleId() {
+function getAllowedRoleIdFromEnv() {
     return process.env.DASHBOARD_ALLOWED_ROLE_ID ||
         process.env.DISCORD_DASHBOARD_ROLE_ID ||
         process.env.DASHBOARD_ROLE_ID ||
         "";
+}
+
+async function getAllowedRoleId() {
+    const config = await loadDashboardConfig().catch(() => null);
+    return config?.bot?.dashboardAllowedRoleId || getAllowedRoleIdFromEnv();
 }
 
 function getBaseUrl(req) {
@@ -29,12 +35,13 @@ function getBaseUrl(req) {
     return `${String(protocol).split(",")[0]}://${req.get("host")}`;
 }
 
-function getOAuthConfig(req) {
+async function getOAuthConfig(req) {
+    const dashboardConfig = await loadDashboardConfig().catch(() => null);
     const config = {
         clientId: process.env.DISCORD_CLIENT_ID || "",
         clientSecret: process.env.DISCORD_CLIENT_SECRET || "",
-        guildId: process.env.DISCORD_GUILD_ID || "",
-        allowedRoleId: getAllowedRoleId(),
+        guildId: dashboardConfig?.bot?.communityGuildId || dashboardConfig?.bot?.guildId || process.env.COMMUNITY_GUILD_ID || process.env.DISCORD_GUILD_ID || "",
+        allowedRoleId: dashboardConfig?.bot?.dashboardAllowedRoleId || getAllowedRoleIdFromEnv(),
         redirectUri: process.env.DISCORD_REDIRECT_URI || `${getBaseUrl(req)}/auth/discord/callback`
     };
 
@@ -231,7 +238,7 @@ function destroySession(req, res) {
 }
 
 async function sessionStillHasRole(session) {
-    const allowedRoleId = getAllowedRoleId();
+    const allowedRoleId = await getAllowedRoleId();
     if (!allowedRoleId) return false;
     if (Date.now() - session.lastRoleCheckAt < ROLE_RECHECK_MS) return true;
 
@@ -279,8 +286,8 @@ function requireDashboardAuth() {
 }
 
 function registerDashboardAuthRoutes(app) {
-    app.get("/auth/discord", (req, res) => {
-        const oauthConfig = getOAuthConfig(req);
+    app.get("/auth/discord", async (req, res) => {
+        const oauthConfig = await getOAuthConfig(req);
         if (!oauthConfig.configured) {
             res.redirect("/dashboard?auth=setup");
             return;
@@ -302,7 +309,7 @@ function registerDashboardAuthRoutes(app) {
     });
 
     app.get("/auth/discord/callback", async (req, res) => {
-        const oauthConfig = getOAuthConfig(req);
+        const oauthConfig = await getOAuthConfig(req);
         const expectedState = getSignedCookie(req, STATE_COOKIE);
         clearCookie(req, res, STATE_COOKIE);
 
